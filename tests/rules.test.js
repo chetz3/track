@@ -218,3 +218,28 @@ test('evaluateAttempt: currentDayNumber never exceeds totalDays', () => {
   const result = evaluateAttempt(cfg, attempt, {}, TODAY);
   assert.equal(result.currentDayNumber, 7);
 });
+
+test('evaluateAttempt: a frozen (already-finalised) week stays green even after weeklyTarget is raised', () => {
+  const start = addDays(TODAY, -10);
+  // Week 1 is frozen green (attempt.greenWeeks = 1); nothing is logged for it,
+  // which would score red under any target if it were re-scored.
+  const attempt = { id: 'a1', startDate: start, status: 'active', greenWeeks: 1 };
+  const days = {};
+  const cfg = config({ totalDays: 100, weeklyTarget: 5 });
+  const result = evaluateAttempt(cfg, attempt, days, TODAY);
+  assert.equal(result.weeks[0].status, 'green');
+  assert.equal(result.outcome, 'active');
+});
+
+test('evaluateAttempt: a later, non-frozen week is still scored against the current weeklyTarget', () => {
+  const start = addDays(TODAY, -17); // week 1 and week 2 both fully locked
+  const attempt = { id: 'a1', startDate: start, status: 'active', greenWeeks: 1 };
+  const days = {};
+  // Week 2: only 3 of 7 days green; weeklyTarget is now 5 -> should be red.
+  for (let i = 7; i < 10; i++) days[addDays(start, i)] = greenDay(addDays(start, i));
+  const cfg = config({ totalDays: 100, weeklyTarget: 5 });
+  const result = evaluateAttempt(cfg, attempt, days, TODAY);
+  assert.equal(result.weeks[0].status, 'green'); // still frozen
+  assert.equal(result.weeks[1].status, 'red');
+  assert.equal(result.outcome, 'reset');
+});

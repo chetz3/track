@@ -78,11 +78,18 @@ export function weekStatus(dayStatuses, weeklyTarget) {
 // (day N reached with every week green). Stops at the first pending
 // (in-progress) or red week — the caller re-runs this against a fresh
 // attempt after applying a reset.
+//
+// attempt.greenWeeks (if set) is the number of leading weeks already
+// finalised green. Those weeks are frozen — always reported green,
+// without being re-scored — so raising weeklyTarget/totalDays later can't
+// retroactively fail a week that already passed under the old settings.
 export function evaluateAttempt(config, attempt, daysMap, today) {
   const { totalDays, weeklyTarget } = config;
   const startDate = attempt.startDate;
+  const frozenWeeks = attempt.greenWeeks || 0;
   const weeks = [];
   let dayNumber = 1;
+  let weekIndex = 0;
   let outcome = 'active';
   let resetDate = null;
 
@@ -96,8 +103,9 @@ export function evaluateAttempt(config, attempt, daysMap, today) {
       weekDayStatuses.push(dayStatus(date, day, config, today));
       weekEndDate = date;
     }
-    const status = weekStatus(weekDayStatuses, weeklyTarget);
+    const status = weekIndex < frozenWeeks ? 'green' : weekStatus(weekDayStatuses, weeklyTarget);
     weeks.push({ startDate: weekStartDate, endDate: weekEndDate, dayStatuses: weekDayStatuses, status });
+    weekIndex++;
 
     if (status === 'pending') break;
     if (status === 'red') {
