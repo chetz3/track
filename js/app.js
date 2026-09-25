@@ -5,7 +5,9 @@
 // Render contract: screens receive an attached container (a live descendant
 // of #app, already in the document); they may measure it (clientWidth,
 // getBoundingClientRect, etc.); they must only write inside it — never touch
-// #app or any sibling directly.
+// #app or any sibling directly. Call hydratePhotos only on nodes already
+// attached inside the container; hydrating a detached subtree revokes its
+// URLs immediately.
 
 import * as store from './store.js';
 import { esc, revokePhotosIn } from './ui/dom.js';
@@ -110,6 +112,10 @@ let previousTop = null;
 let previousScrollKey = null;
 let renderScheduled = false;
 let renderSeq = 0;
+// The pre-render scrollY, held across a render that gets superseded mid-await
+// so the next render reads the real pre-swap position rather than whatever
+// scrollY has clamped to once #app was emptied for the swap.
+let pendingScrollY = null;
 
 function scheduleRender() {
   if (renderScheduled) return;
@@ -141,10 +147,17 @@ function routeScrollKey(key, params) {
 // The new screen's container is attached to #app up front, *before*
 // renderFn runs, so screens can measure themselves (clientWidth,
 // getBoundingClientRect, ...) during their own render — a detached node
-// always measures as zero.
+// always measures as zero. The swap briefly empties #app, which would
+// otherwise collapse the page and clamp window.scrollY before the render
+// that triggered it has even finished reading it (or before a render that
+// supersedes it mid-await gets a chance to); `container.style.minHeight`
+// holds the previous screen's height across the swap so the page doesn't
+// collapse, and `pendingScrollY` holds the intended scroll position across
+// however many superseding renders run before one finally commits.
 async function render() {
   const token = ++renderSeq;
-  const scrollY = window.scrollY;
+  const scrollY = pendingScrollY ?? window.scrollY;
+  pendingScrollY = scrollY;
   const hasChallenges = store.state.challenges.length > 0;
   const { top, key, params } = matchRoute();
 
@@ -152,6 +165,7 @@ async function render() {
   container.dataset.renderRoot = '';
 
   const old = appEl.firstElementChild;
+  container.style.minHeight = old ? old.offsetHeight + 'px' : '';
   appEl.replaceChildren(container);
   if (old) revokePhotosIn(old);
 
@@ -172,6 +186,8 @@ async function render() {
 
   if (token !== renderSeq) return; // a newer render has since swapped this container out; discard
 
+  container.style.minHeight = '';
+
   setActiveTab(effectiveTop === 'empty' ? 'today' : top);
   tabbarEl.hidden = !showTabbar;
 
@@ -190,6 +206,7 @@ async function render() {
   } else {
     window.scrollTo(0, 0);
   }
+  pendingScrollY = null;
 }
 
 window.addEventListener('hashchange', () => scheduleRender());

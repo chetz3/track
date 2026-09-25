@@ -10,7 +10,8 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); font: 400 17px/1.35 var(--font); -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent; }
 body { padding: env(safe-area-inset-top) 0 calc(96px + env(safe-area-inset-bottom)); }
-#app { max-width: 640px; margin: 0 auto; padding: 8px 16px 24px; display: flex; flex-direction: column; gap: 24px; }
+#app { max-width: 640px; margin: 0 auto; padding: 8px 16px 24px; }
+#app > [data-render-root] { display: flex; flex-direction: column; gap: 24px; }
 .large-title { font-size: 34px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; margin: 8px 0 0; }
 .subtitle { font-size: 15px; color: var(--text2); margin: 4px 0 0; }
 .section { display: flex; flex-direction: column; gap: 8px; }
