@@ -11,6 +11,7 @@ import { savePhoto } from '../photos.js';
 import { esc, formatDateLong, hydratePhotos, readFileAsPhoto } from './dom.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
 
 // Which step (if any) has its edit panel open. Kept in module scope, keyed
 // by `${challengeId}:${date}`, so it survives the store-driven re-renders
@@ -24,8 +25,17 @@ let expandedStepId = null;
 const lastStatusByKey = new Map();
 
 // Mutable box the delegated (attached-once) event listeners read at event
-// time, so they always act on the screen currently rendered into `root`.
+// time, so a step-row tap can re-render whichever screen is currently
+// mounted into `root`. Never used for save correctness (see fieldContext).
 let current = null;
+
+// The number/note field the user currently has focus in, if any: identifies
+// the field (role/stepId/challengeId/date) and the latest uncommitted raw
+// value + caret so a re-render triggered mid-typing (by any store change,
+// not just this field's own) can put it all back instead of dropping the
+// keystrokes and closing the on-screen keyboard. Cleared once focus truly
+// leaves our fields (see wireDelegation's focusout handler).
+let focusRecord = null;
 
 const PILL_LABELS = { green: 'Complete', red: 'Missed', pending: 'In progress', future: 'Upcoming', outside: 'Outside attempt' };
 
@@ -36,14 +46,18 @@ export function miniRing(done, total, sizePx) {
   const stroke = Math.max(3, Math.round(size * 0.09));
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
-  const pct = total > 0 ? Math.min(1, Math.max(0, done / total)) : 0;
-  const dash = c * pct;
+  const rawPct = total > 0 ? done / total : 0;
+  const pct = Number.isFinite(rawPct) ? Math.min(1, Math.max(0, rawPct)) : 0;
   const center = size / 2;
-  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="mini-ring" role="img" aria-label="${done} of ${total}">` +
-    `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--raised)" stroke-width="${stroke}" />` +
-    `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--accent)" stroke-width="${stroke}" stroke-linecap="round" ` +
-    `stroke-dasharray="${dash} ${c - dash}" transform="rotate(-90 ${center} ${center})" />` +
-    `</svg>`;
+  let svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="mini-ring" role="img" aria-label="${done} of ${total}">` +
+    `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--raised)" stroke-width="${stroke}" />`;
+  if (pct > 0) {
+    const dash = c * pct;
+    svg += `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--accent)" stroke-width="${stroke}" stroke-linecap="round" ` +
+      `stroke-dasharray="${dash} ${c - dash}" transform="rotate(-90 ${center} ${center})" />`;
+  }
+  svg += `</svg>`;
+  return svg;
 }
 
 // ---------- day/week arithmetic ----------
@@ -95,9 +109,14 @@ function stepSummaryHtml(step, entry) {
   return parts.join('');
 }
 
-function photoRowHtml(step, entry) {
+// fieldCtx = { challengeId, date }, stamped onto each interactive row so
+// event handlers can read the right target straight off the DOM (see
+// fieldContext) instead of a shared module variable that a later render
+// (of a different challenge/day) would have already overwritten by the
+// time an in-flight async action — e.g. the photo picker — resolves.
+function photoRowHtml(step, entry, fieldCtx) {
   const label = entry.photoId ? 'Replace photo' : 'Take photo';
-  return `<div class="row">
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <span class="field-label">Photo</span>
     <label class="btn btn-secondary photo-field-btn">${esc(label)}
       <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}" />
@@ -105,34 +124,34 @@ function photoRowHtml(step, entry) {
   </div>`;
 }
 
-function numberRowHtml(step, entry) {
+function numberRowHtml(step, entry, fieldCtx) {
   const value = entry.value != null ? esc(String(entry.value)) : '';
   const unit = step.number.unit ? `<span class="field-unit">${esc(step.number.unit)}</span>` : '';
-  return `<div class="row">
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <span class="field-label">${esc(step.number.label)}</span>
     <input type="text" inputmode="decimal" data-role="number-input" data-step-id="${esc(step.id)}" value="${value}" />
     ${unit}
   </div>`;
 }
 
-function noteRowHtml(step, entry) {
-  return `<div class="row">
+function noteRowHtml(step, entry, fieldCtx) {
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <span class="field-label">Note</span>
     <textarea data-role="note-input" data-step-id="${esc(step.id)}">${esc(entry.note || '')}</textarea>
   </div>`;
 }
 
-function expandedRowsHtml(step, entry) {
+function expandedRowsHtml(step, entry, fieldCtx) {
   let html = '';
-  if (step.photo !== 'none') html += photoRowHtml(step, entry);
-  if (step.number) html += numberRowHtml(step, entry);
-  if (step.note !== 'none') html += noteRowHtml(step, entry);
+  if (step.photo !== 'none') html += photoRowHtml(step, entry, fieldCtx);
+  if (step.number) html += numberRowHtml(step, entry, fieldCtx);
+  if (step.note !== 'none') html += noteRowHtml(step, entry, fieldCtx);
   return html;
 }
 
-function editableStepRowHtml(step, entry, expanded) {
+function editableStepRowHtml(step, entry, expanded, fieldCtx) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
-  let html = `<div class="row" data-role="step-row" data-step-id="${esc(step.id)}">
+  let html = `<div class="row" data-role="step-row" data-step-id="${esc(step.id)}" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <input type="checkbox" class="check" data-role="check" ${entry.done ? 'checked' : ''} />
     <div class="row-label">
       <div>${esc(step.name)}</div>
@@ -140,12 +159,13 @@ function editableStepRowHtml(step, entry, expanded) {
     </div>
     <div class="step-summary">${stepSummaryHtml(step, entry)}</div>
   </div>`;
-  if (expanded) html += expandedRowsHtml(step, entry);
+  if (expanded) html += expandedRowsHtml(step, entry, fieldCtx);
   return html;
 }
 
 function readOnlyStepRowHtml(step, entry) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
+  const noteHtml = entry.note ? `<div class="step-note">${esc(entry.note)}</div>` : '';
   const complete = isStepComplete(step, entry);
   const check = `<span class="ro-check${complete ? ' done' : ''}">${complete ? '✓' : '–'}</span>`;
   const summary = stepSummaryHtml(step, entry);
@@ -153,9 +173,83 @@ function readOnlyStepRowHtml(step, entry) {
     <div class="row-label">
       <div>${esc(step.name)}</div>
       ${requiredCaption}
+      ${noteHtml}
     </div>
     <div class="row-value">${check}${summary}</div>
   </div>`;
+}
+
+// ---------- focus preservation across store-driven re-renders ----------
+
+// Nearest ancestor (or self) carrying the challenge/date this field/row
+// belongs to. Reading identity off the DOM at event time (rather than the
+// shared `current` box) means a late event from a now-detached row — the
+// photo picker returning after the user has already navigated elsewhere —
+// still saves against the challenge/date it was opened for.
+function fieldContext(el) {
+  const row = el.closest('[data-challenge-id]');
+  return row ? { challengeId: row.dataset.challengeId, date: row.dataset.date } : null;
+}
+
+function rememberFocus(e) {
+  const role = ROLE_MAP[e.target.dataset.role];
+  if (!role) return;
+  const ctx = fieldContext(e.target);
+  if (!ctx) return;
+  focusRecord = {
+    role,
+    stepId: e.target.dataset.stepId,
+    challengeId: ctx.challengeId,
+    date: ctx.date,
+    value: e.target.value,
+    selectionStart: e.target.selectionStart ?? null,
+    selectionEnd: e.target.selectionEnd ?? null,
+  };
+}
+
+function trackFocusValue(e) {
+  const role = ROLE_MAP[e.target.dataset.role];
+  if (!role || !focusRecord || focusRecord.role !== role || focusRecord.stepId !== e.target.dataset.stepId) return;
+  focusRecord.value = e.target.value;
+  focusRecord.selectionStart = e.target.selectionStart;
+  focusRecord.selectionEnd = e.target.selectionEnd;
+}
+
+function forgetFocusIfLeft() {
+  setTimeout(() => {
+    const active = document.activeElement;
+    const stillOurs = active && ROLE_MAP[active.dataset && active.dataset.role];
+    if (!stillOurs) focusRecord = null;
+  }, 0);
+}
+
+// Called after every (re-)render: if the user was mid-typing in a field on
+// this same challenge/date, put the field back the way they left it —
+// value (even invalid text, re-flagged), caret position, and focus itself —
+// since the router always builds a brand-new DOM subtree.
+function restoreFocus(root, challengeId, date) {
+  if (!focusRecord) return;
+  if (focusRecord.challengeId !== challengeId || focusRecord.date !== date) return;
+  const roleAttr = focusRecord.role === 'number' ? 'number-input' : 'note-input';
+  const stepIdSelector = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(focusRecord.stepId) : focusRecord.stepId;
+  const el = root.querySelector(`[data-role="${roleAttr}"][data-step-id="${stepIdSelector}"]`);
+  if (!el) return;
+  if (focusRecord.value !== undefined && el.value !== focusRecord.value) {
+    el.value = focusRecord.value;
+    if (focusRecord.role === 'number') {
+      const trimmed = focusRecord.value.trim();
+      const parsed = parseNumberInput(focusRecord.value);
+      el.classList.toggle('invalid', trimmed !== '' && parsed === undefined);
+    }
+  }
+  if (focusRecord.selectionStart != null && typeof el.setSelectionRange === 'function') {
+    try {
+      el.setSelectionRange(focusRecord.selectionStart, focusRecord.selectionEnd ?? focusRecord.selectionStart);
+    } catch (_) {
+      // setSelectionRange can throw on some input types; focusing still matters more.
+    }
+  }
+  el.focus({ preventScroll: true });
 }
 
 // ---------- delegated event wiring (attached once per root) ----------
@@ -163,6 +257,10 @@ function readOnlyStepRowHtml(step, entry) {
 function wireDelegation(root) {
   if (root.__todayWired) return;
   root.__todayWired = true;
+
+  root.addEventListener('focusin', rememberFocus);
+  root.addEventListener('input', trackFocusValue);
+  root.addEventListener('focusout', forgetFocusIfLeft);
 
   root.addEventListener('click', (e) => {
     const switchBtn = e.target.closest('[data-role="switch-challenge"]');
@@ -184,23 +282,24 @@ function wireDelegation(root) {
   });
 
   root.addEventListener('change', async (e) => {
-    if (!current) return;
-    const { challengeId, date } = current;
-
     const check = e.target.closest('[data-role="check"]');
     if (check) {
+      const ctx = fieldContext(check);
+      if (!ctx) return;
       const stepId = check.closest('[data-role="step-row"]').dataset.stepId;
-      await store.updateStep(challengeId, date, stepId, { done: check.checked });
+      await store.updateStep(ctx.challengeId, ctx.date, stepId, { done: check.checked });
       return;
     }
 
     const numberInput = e.target.closest('[data-role="number-input"]');
     if (numberInput) {
+      const ctx = fieldContext(numberInput);
+      if (!ctx) return;
       const stepId = numberInput.dataset.stepId;
       const raw = numberInput.value;
       if (raw.trim() === '') {
         numberInput.classList.remove('invalid');
-        await store.updateStep(challengeId, date, stepId, { value: undefined });
+        await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: undefined });
         return;
       }
       const parsed = parseNumberInput(raw);
@@ -209,24 +308,28 @@ function wireDelegation(root) {
         return;
       }
       numberInput.classList.remove('invalid');
-      await store.updateStep(challengeId, date, stepId, { value: parsed });
+      await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: parsed });
       return;
     }
 
     const noteInput = e.target.closest('[data-role="note-input"]');
     if (noteInput) {
+      const ctx = fieldContext(noteInput);
+      if (!ctx) return;
       const stepId = noteInput.dataset.stepId;
-      await store.updateStep(challengeId, date, stepId, { note: noteInput.value });
+      await store.updateStep(ctx.challengeId, ctx.date, stepId, { note: noteInput.value });
       return;
     }
 
     const photoInput = e.target.closest('[data-role="photo-input"]');
     if (photoInput) {
+      const ctx = fieldContext(photoInput);
+      if (!ctx) return;
       const stepId = photoInput.dataset.stepId;
       const file = readFileAsPhoto(photoInput);
       if (!file) return;
       const photoId = await savePhoto(file);
-      await store.updateStep(challengeId, date, stepId, { photoId });
+      await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
       return;
     }
   });
@@ -253,6 +356,7 @@ async function renderScreen(root, { date, dayRoute }) {
   const ctx = computeDayContext(challenge, attempt, date, day, todayStr);
   const editable = !ctx.outside && isEditable(date, todayStr);
   const pop = popClassFor(key, ctx.status);
+  const fieldCtx = { challengeId: challenge.id, date };
 
   current = {
     challengeId: challenge.id,
@@ -281,17 +385,20 @@ async function renderScreen(root, { date, dayRoute }) {
   const stepsHtml = challenge.steps.map((step) => {
     const entry = (day.steps && day.steps[step.id]) || {};
     if (!editable) return readOnlyStepRowHtml(step, entry);
-    return editableStepRowHtml(step, entry, expandedStepId === step.id);
+    return editableStepRowHtml(step, entry, expandedStepId === step.id, fieldCtx);
   }).join('');
+
+  const sectionTitle = dayRoute && date !== todayStr ? 'Steps' : "Today's steps";
 
   root.innerHTML = `${headerHtml}
     ${heroHtml}
     <div class="section">
-      <h2 class="section-header">Today's steps</h2>
+      <h2 class="section-header">${sectionTitle}</h2>
       <div class="group">${stepsHtml}</div>
     </div>`;
 
   wireDelegation(root);
+  restoreFocus(root, challenge.id, date);
   await hydratePhotos(root);
 }
 
