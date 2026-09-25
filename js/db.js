@@ -102,11 +102,32 @@ export async function getAllByChallenge(storeName, challengeId) {
 }
 
 export async function putMany(entries) {
+  if (entries.length === 0) return;
   const db = await openDB();
   const names = [...new Set(entries.map((e) => e.store))];
   const tx = db.transaction(names, 'readwrite');
   for (const { store, value } of entries) tx.objectStore(store).put(value);
-  return new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = (event) => reject(event.target.error);
+    tx.onabort = () => reject(tx.error || new Error('Import failed'));
+  });
+}
+
+// Clears all four stores and writes `entries` back in, all inside ONE
+// readwrite transaction, so a failure partway through (e.g. QuotaExceededError
+// while restoring a photo Blob) aborts the whole thing and the previous data
+// is left intact rather than the user ending up with an emptied DB.
+export async function replaceAll(entries) {
+  const db = await openDB();
+  const tx = db.transaction(STORES, 'readwrite');
+  for (const name of STORES) tx.objectStore(name).clear();
+  for (const { store, value } of entries) tx.objectStore(store).put(value);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = (event) => reject(event.target.error);
+    tx.onabort = () => reject(tx.error || new Error('Import failed'));
+  });
 }
 
 export async function deleteChallengeCascade(challengeId) {

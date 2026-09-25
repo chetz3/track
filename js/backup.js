@@ -1,7 +1,7 @@
 // Export/import the whole database as a single JSON backup file.
 // Photos are embedded as base64 data URLs so the backup is one portable file.
 
-import { getAll, clearAll, putMany } from './db.js';
+import { getAll, replaceAll } from './db.js';
 import { migrateV1, dayKey } from './migrate.js';
 
 function blobToBase64(blob) {
@@ -99,22 +99,36 @@ function toV2(backup) {
   throw new Error('Invalid backup file');
 }
 
-function validateV2(b) {
+function isObject(x) {
+  return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
+export function validateV2(b) {
   const bad = () => { throw new Error('Invalid backup file'); };
   if (!Array.isArray(b.challenges) || !Array.isArray(b.attempts) || !Array.isArray(b.days) || !Array.isArray(b.photos)) bad();
   const ids = new Set();
   for (const c of b.challenges) {
-    if (typeof c.id !== 'string' || !Array.isArray(c.steps)) bad();
+    if (!isObject(c) || typeof c.id !== 'string' || !Array.isArray(c.steps)) bad();
     ids.add(c.id);
   }
-  for (const a of b.attempts) if (typeof a.id !== 'string' || !ids.has(a.challengeId) || !DATE_RE.test(a.startDate)) bad();
-  for (const d of b.days) if (!DATE_RE.test(d.date) || !ids.has(d.challengeId) || d.key !== dayKey(d.challengeId, d.date)) bad();
+  for (const a of b.attempts) {
+    if (!isObject(a) || typeof a.id !== 'string' || !ids.has(a.challengeId) || !DATE_RE.test(a.startDate)) bad();
+  }
+  for (const d of b.days) {
+    if (!isObject(d) || !DATE_RE.test(d.date) || !ids.has(d.challengeId) || d.key !== dayKey(d.challengeId, d.date)) bad();
+  }
+  for (const p of b.photos) {
+    if (!isObject(p) || typeof p.id !== 'string' || p.id.length === 0) bad();
+  }
 }
 
 // Replaces ALL data in the database with the contents of the backup.
 // Caller is responsible for confirming with the user first.
 // Everything is validated and decoded BEFORE any existing data is cleared,
 // so a corrupt/partial file fails loudly without wiping the user's data.
+// The clear + write itself is one atomic IndexedDB transaction (replaceAll),
+// so a mid-write failure (e.g. QuotaExceededError restoring a photo) aborts
+// the whole transaction and leaves the previous data intact.
 export async function importBackup(jsonText) {
   const parsed = JSON.parse(jsonText);
   if (!parsed || typeof parsed !== 'object') throw new Error('Invalid backup file');
@@ -128,8 +142,7 @@ export async function importBackup(jsonText) {
     createdAt: p.createdAt,
   }));
 
-  await clearAll();
-  await putMany([
+  await replaceAll([
     ...backup.challenges.map((value) => ({ store: 'challenges', value })),
     ...backup.attempts.map((value) => ({ store: 'attempts', value })),
     ...backup.days.map((value) => ({ store: 'days', value })),
