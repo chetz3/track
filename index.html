@@ -4,20 +4,24 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Challenge Tracker</title>
-  <meta name="theme-color" content="#121214" />
+  <meta name="theme-color" content="#000" />
   <meta name="color-scheme" content="dark" />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icons/icon-192.png" />
   <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./css/styles.css" />
+  <script src="./vendor/d3.v7.min.js" defer></script>
 </head>
 <body>
-  <div id="app"></div>
-  <nav class="bottom-nav" id="bottom-nav">
+  <main id="app"></main>
+  <nav class="tabbar" id="tabbar">
     <a href="#/today" data-route="today">Today</a>
     <a href="#/calendar" data-route="calendar">Calendar</a>
-    <a href="#/overview" data-route="overview">Overview</a>
-    <a href="#/settings" data-route="settings">Settings</a>
+    <a href="#/stats" data-route="stats">Stats</a>
+    <a href="#/challenges" data-route="challenges">Challenges</a>
   </nav>
   <script type="module" src="./js/app.js"></script>
 </body>
