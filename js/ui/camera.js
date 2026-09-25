@@ -53,7 +53,7 @@ function liveHtml() {
     <p class="camera-message error camera-capture-error" hidden>${esc(CAPTURE_FAILED_MESSAGE)}</p>
     <div class="btn-pair">
       <button type="button" class="btn btn-secondary" data-role="cancel">Cancel</button>
-      <button type="button" class="btn btn-secondary" data-role="switch-camera">Switch camera</button>
+      <button type="button" class="btn btn-secondary" data-role="switch-camera" disabled>Switch camera</button>
     </div>
     <button type="button" class="btn btn-primary" data-role="capture" disabled>Capture</button>`;
 }
@@ -72,6 +72,14 @@ export function openCamera({ onCapture, onUseLibrary }) {
   let stream = null;
   let closed = false;
   let capturing = false;
+  // Bumped at the start of every startCamera call (initial start, retry, or
+  // a camera switch). A getUserMedia call started under an earlier gen that
+  // resolves/rejects after a newer one has started is stale: switching
+  // cameras while the first request is still pending can't stop it via
+  // stopStream() (nothing's assigned to `stream` yet), so without this the
+  // first stream would either go unstopped once it finally resolves, or its
+  // late rejection would call showError and clobber the newer live view.
+  let startGen = 0;
 
   const stopStream = () => {
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
@@ -113,16 +121,21 @@ export function openCamera({ onCapture, onUseLibrary }) {
   }
 
   async function startCamera(body) {
+    const gen = ++startGen;
     body.innerHTML = liveHtml();
     const video = body.querySelector('.camera-video');
     const captureBtn = body.querySelector('[data-role="capture"]');
+    const switchBtn = body.querySelector('[data-role="switch-camera"]');
     const captureError = body.querySelector('.camera-capture-error');
 
     // Wired immediately — before getUserMedia is even called — so Cancel
     // works the whole time the permission prompt/device warm-up is pending,
     // instead of forcing the user to Escape or tap the backdrop to get out.
+    // Switch camera stays disabled (see liveHtml) until a stream is actually
+    // attached below — a second line of defence alongside the gen check,
+    // since a disabled button never dispatches click in the first place.
     body.querySelector('[data-role="cancel"]').addEventListener('click', () => sheetClose());
-    body.querySelector('[data-role="switch-camera"]').addEventListener('click', () => {
+    switchBtn.addEventListener('click', () => {
       stopStream();
       facing = facing === 'environment' ? 'user' : 'environment';
       startCamera(body);
@@ -138,18 +151,24 @@ export function openCamera({ onCapture, onUseLibrary }) {
         video: { facingMode: { ideal: facing }, width: { ideal: 1920 } },
         audio: false,
       });
-      if (closed) { newStream.getTracks().forEach((t) => t.stop()); return; }
+      // Either the sheet is gone, or a newer startCamera call (a switch, or
+      // another retry) has already started — this stream lost the race and
+      // must not become `stream` (it would orphan whatever the newer call
+      // sets, or overwrite it after the fact) nor touch a `body` a newer
+      // call may have already rewritten.
+      if (closed || gen !== startGen) { newStream.getTracks().forEach((t) => t.stop()); return; }
       stream = newStream;
     } catch (err) {
-      if (closed) return; // sheet's gone; nothing left to show an error in
+      if (closed || gen !== startGen) return; // stale or sheet's gone; nothing left to show an error in
       showError(body, messageForError(err));
       return;
     }
     video.srcObject = stream;
 
-    // Capture stays disabled until there's an actual frame to draw — firing
-    // early gives a 0x0 canvas and a null blob (see the toBlob guard below).
-    video.addEventListener('loadedmetadata', () => { captureBtn.disabled = false; }, { once: true });
+    // Capture (and Switch, so a second switch can't race this one) stay
+    // disabled until there's an actual frame to draw — firing early gives a
+    // 0x0 canvas and a null blob (see the toBlob guard below).
+    video.addEventListener('loadedmetadata', () => { captureBtn.disabled = false; switchBtn.disabled = false; }, { once: true });
 
     captureBtn.addEventListener('click', () => {
       if (capturing || captureBtn.disabled) return;
@@ -162,9 +181,16 @@ export function openCamera({ onCapture, onUseLibrary }) {
       canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
       canvas.toBlob((b) => {
         capturing = false;
-        if (!b) { captureError.hidden = false; return; } // keep the sheet open so the user can retry
+        if (!b) {
+          if (!closed) captureError.hidden = false; // sheet may already be gone; nothing to show it in
+          return;
+        }
+        // The user may have dismissed the sheet between tapping Capture and
+        // the blob resolving — the photo they took is still good, so save
+        // it either way, but only touch the (possibly detached) sheet DOM
+        // if it's still around.
         onCapture(new File([b], 'camera-' + Date.now() + '.jpg', { type: 'image/jpeg', lastModified: Date.now() }));
-        sheetClose();
+        if (!closed) sheetClose();
       }, 'image/jpeg', 0.9);
     });
   }
