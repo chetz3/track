@@ -56,6 +56,13 @@ async function hydratePhotos(container) {
 
 // ---------- data loading / attempt evaluation ----------
 
+function pickDisplayAttempt(attempts) {
+  const active = attempts.find((a) => a.status === 'active');
+  if (active) return active;
+  const completed = attempts.filter((a) => a.status === 'complete');
+  return completed.reduce((latest, a) => (!latest || a.startDate > latest.startDate ? a : latest), null);
+}
+
 async function loadState() {
   state.config = await db.getConfig();
   if (!state.config) return;
@@ -63,7 +70,7 @@ async function loadState() {
   const days = await db.getAll('days');
   state.days = {};
   for (const d of days) state.days[d.date] = d;
-  state.activeAttempt = state.attempts.find((a) => a.status === 'active') || null;
+  state.activeAttempt = pickDisplayAttempt(state.attempts);
   await reevaluate();
 }
 
@@ -73,16 +80,29 @@ async function reevaluate() {
     return;
   }
   let attempt = state.activeAttempt;
+  if (attempt.status !== 'active') {
+    // Finalised (complete/reset) attempts are frozen — just compute a
+    // display evaluation, never mutate them.
+    state.lastEvaluation = evaluateAttempt(state.config, attempt, state.days, todayStr());
+    return;
+  }
   let guard = 0;
   while (guard++ < 1000) {
     const result = evaluateAttempt(state.config, attempt, state.days, todayStr());
     state.lastEvaluation = result;
+
+    const greenWeeksCount = result.weeks.filter((w) => w.status === 'green').length;
+    if (greenWeeksCount > (attempt.greenWeeks || 0)) {
+      attempt.greenWeeks = greenWeeksCount;
+      await db.put('attempts', attempt);
+    }
+
     if (result.outcome === 'reset') {
       const failedWeek = result.weeks[result.weeks.length - 1];
       attempt.status = 'reset';
       attempt.endDate = failedWeek.endDate;
       await db.put('attempts', attempt);
-      const newAttempt = { id: makeId('attempt'), startDate: result.resetDate, status: 'active' };
+      const newAttempt = { id: makeId('attempt'), startDate: result.resetDate, status: 'active', greenWeeks: 0 };
       await db.put('attempts', newAttempt);
       state.attempts.push(newAttempt);
       attempt = newAttempt;
@@ -194,7 +214,8 @@ function renderSetupScreen() {
         </div>
         <div class="field">
           <label for="s-start">Start date</label>
-          <input type="date" id="s-start" value="${todayStr()}" required />
+          <input type="date" id="s-start" value="${todayStr()}" min="${addDays(todayStr(), -1)}" required />
+          <p class="hint">Earliest allowed is yesterday, so no days are already locked when you start.</p>
         </div>
         <div class="field">
           <label for="s-target">Green days needed per week (1-7)</label>
@@ -268,9 +289,11 @@ function attachSetupHandlers() {
       weeklyTarget: Math.min(7, Math.max(1, parseInt(document.getElementById('s-target').value, 10) || 5)),
       steps,
     };
-    const startDate = document.getElementById('s-start').value || todayStr();
+    const minStart = addDays(todayStr(), -1);
+    let startDate = document.getElementById('s-start').value || todayStr();
+    if (startDate < minStart) startDate = minStart;
     await db.setConfig(config);
-    const attempt = { id: makeId('attempt'), startDate, status: 'active' };
+    const attempt = { id: makeId('attempt'), startDate, status: 'active', greenWeeks: 0 };
     await db.put('attempts', attempt);
     await loadState();
     try { await navigator.storage.persist(); } catch (_) { /* ignore */ }
@@ -405,7 +428,7 @@ async function handleStepPhotoChange(date, stepId, file) {
   day.steps = day.steps || {};
   const oldId = day.steps[stepId] && day.steps[stepId].photoId;
   const id = await savePhoto(file);
-  day.steps[stepId] = { ...(day.steps[stepId] || {}), photoId: id };
+  day.steps[stepId] = { ...(day.steps[stepId] || {}), photoId: id, done: true };
   await saveDay(day);
   if (oldId) await deletePhoto(oldId);
   await render();
@@ -518,8 +541,10 @@ function buildFullOverview() {
   const config = state.config;
   const attempt = state.activeAttempt;
   const today = todayStr();
+  const frozenWeeks = attempt.greenWeeks || 0;
   const weeks = [];
   let dayNumber = 1;
+  let weekIndex = 0;
   while (dayNumber <= config.totalDays) {
     const dates = [];
     const statuses = [];
@@ -528,7 +553,9 @@ function buildFullOverview() {
       dates.push(date);
       statuses.push(dayStatus(date, state.days[date], config, today));
     }
-    weeks.push({ dates, statuses, status: weekStatus(statuses, config.weeklyTarget) });
+    const status = weekIndex < frozenWeeks ? 'green' : weekStatus(statuses, config.weeklyTarget);
+    weeks.push({ dates, statuses, status });
+    weekIndex++;
   }
   return weeks;
 }
@@ -588,7 +615,7 @@ function renderSettingsScreen() {
     <button type="button" id="export-btn">Export backup</button>
     <p class="hint">Saves everything (including photos) to one JSON file.</p>
     <button type="button" class="secondary" id="import-btn">Import backup</button>
-    <input type="file" id="import-input" accept="application/json" style="display:none" />
+    <input type="file" id="import-input" accept=".json,application/json" style="display:none" />
     <p class="hint">Replaces ALL data on this device.</p>
   </div>`;
 
@@ -688,6 +715,17 @@ function attachSettingsHandlers() {
       steps,
     };
     await db.setConfig(config);
+
+    // Today's snapshot (if it already exists) is re-taken from the new
+    // config so a step added/removed today is reflected immediately.
+    // Yesterday and older days are left untouched.
+    const today = todayStr();
+    const todayDay = state.days[today];
+    if (todayDay) {
+      todayDay.mandatoryStepIds = [BODY_STEP_ID, ...config.steps.filter((s) => s.mandatory).map((s) => s.id)];
+      await db.put('days', todayDay);
+    }
+
     await loadState();
     await render();
     alert('Settings saved.');
