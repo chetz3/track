@@ -45,6 +45,19 @@ Pure function in `js/migrate.js`, unit-tested:
 - **Buttons on phones (< 600px):** every action button fills the width available to it. A single action spans the full content width. Paired actions (e.g. Export / Import, Cancel / Save) sit in equal-width columns that together fill the row. Buttons are 50px tall with 12px radius and centred text, never shrink-wrapped to their label. Inside grouped rows, a trailing button (e.g. "Take photo") fills the space right of the label and thumbnail. Sheets end with a full-width primary button pinned above the safe area. Checked at 360 and 390px.
 - **Motion:** 250ms ease-out screen transitions, sheet slide-up, D3 transitions on charts, and respect for prefers-reduced-motion.
 
+## Photos: camera permission and date rule
+- A photo field offers two buttons: **Take photo** and **Choose from library**.
+- **Take photo** opens an in-app camera sheet using `getUserMedia` (rear camera, with a switch-camera button and a full-width shutter). Before the browser's own permission prompt, a short explainer asks: "Allow camera to take today's photo" → **Allow camera**. If permission is denied or no camera is available, the sheet explains how to re-enable it (iOS: Settings → Safari → Camera; Android: site settings) and offers **Choose from library** instead. The stream is stopped whenever the sheet closes.
+- **Choose from library** opens the normal picker (no `capture` attribute, so both camera and library are offered). The picked photo must be **from the day being logged**. That's the EXIF DateTimeOriginal when present, otherwise the file's last-modified date. If the date doesn't match, the photo is rejected with "This photo is from Tue, 22 Sep. Pick one taken on Thu, 25 Sep, or take a new one."
+
+## Green-day summary viewer
+- Tapping a **green** day in the Calendar or Overview (or "View summary" on any day's detail) opens a full-screen viewer:
+  - The day's photos fill the screen, swipeable horizontally with scroll-snap and dot indicators.
+  - The **right 30% of the screen** is a translucent overlay (blurred dark glass on top of the photo) listing every activity for that day: the date, the status pill, and each step with its done/not-done mark, name, number value with unit, note (clamped to 3 lines), and whether a photo was attached. The panel scrolls if it's long.
+  - A close button is at the top-left. "Edit day" appears only when the day is still editable.
+  - With no photos, the panel sits over a dark background.
+- Tapping a non-green day opens the normal day detail as before.
+
 ## Backup
 Export v2 contains all challenges. Import accepts v1 (converted with the migration) and v2, and validates everything before wiping (existing behaviour).
 
