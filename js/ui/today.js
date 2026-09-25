@@ -38,6 +38,16 @@ let current = null;
 // leaves our fields (see wireDelegation's focusout handler).
 let focusRecord = null;
 
+// Round-1 fix: expandedKey (and the focusRecord reset tied to it) only
+// changes inside renderScreen, i.e. only when the challenge or date being
+// viewed actually changes. Today(A,D) -> another tab (e.g. #/calendar) ->
+// Today(A,D) never changes that key, so a focusRecord left over from before
+// the user switched tabs would otherwise survive and get restored into the
+// freshly re-expanded field. Any real navigation changes location.hash;
+// store-driven re-renders (the case restoreFocus exists for) never do, so
+// this only fires on genuine navigation. Registered once at module load.
+window.addEventListener('hashchange', () => { focusRecord = null; });
+
 // Photo-date mismatch message per step, keyed the same way as expandedKey
 // (`${challengeId}:${date}:${stepId}`), shown as an inline red footer under
 // the photo row until the step is re-collapsed/expanded, a matching photo is
@@ -274,18 +284,41 @@ function restoreFocus(root, challengeId, date) {
 // acted (see fieldContext), not off the shared `current` box, so a photo
 // that resolves after the user has navigated away still saves (or is
 // rejected) against the row it was opened for.
-async function handlePhotoFile(ctx, stepId, file) {
+// `fromCamera` skips the day-match check: the spec's "must match the day
+// being logged" rule targets the library picker (any photo could be handed
+// to it), not a photo the in-app camera just took — which is also the only
+// way to log yesterday's photo at all, since a camera shot's Exif/lastModified
+// date is always "now".
+async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
   if (!file) return;
   const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
-  const photoDate = await photoDateOf(file);
-  if (photoDate !== ctx.date) {
-    photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
-    current?.rerender();
-    return;
+  if (!fromCamera) {
+    const photoDate = await photoDateOf(file);
+    if (photoDate !== ctx.date) {
+      photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
+      // Only re-render if this row is still the one on screen — a rejection
+      // that resolves after the user has navigated elsewhere shouldn't yank
+      // them back or re-render a now-unrelated screen.
+      if (current && current.challengeId === ctx.challengeId && current.date === ctx.date) current.rerender();
+      return;
+    }
   }
   photoErrorByKey.delete(key);
   const photoId = await savePhoto(file);
   await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
+}
+
+// Re-queries the library input for (ctx, stepId) against the *live* root at
+// the moment it's needed, rather than a row element captured back when the
+// camera button was clicked — the camera sheet can stay open across a
+// store-driven re-render that replaces that row entirely. Returns null (do
+// nothing) if the row/input no longer exists, e.g. the step got collapsed or
+// the user navigated to a different challenge/day while the sheet was open.
+function findPhotoInput(root, ctx, stepId) {
+  const cssEscape = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape : (s) => s;
+  return root.querySelector(
+    `[data-challenge-id="${cssEscape(ctx.challengeId)}"][data-date="${cssEscape(ctx.date)}"] [data-role="photo-input"][data-step-id="${cssEscape(stepId)}"]`
+  );
 }
 
 // ---------- delegated event wiring (attached once per root) ----------
@@ -324,10 +357,9 @@ function wireDelegation(root) {
       const ctx = fieldContext(cameraBtn);
       if (!ctx) return;
       const stepId = cameraBtn.dataset.stepId;
-      const row = cameraBtn.closest('.row');
       openCamera({
-        onCapture: (file) => { handlePhotoFile(ctx, stepId, file); },
-        onUseLibrary: () => { row?.querySelector('[data-role="photo-input"]')?.click(); },
+        onCapture: (file) => { handlePhotoFile(ctx, stepId, file, { fromCamera: true }); },
+        onUseLibrary: () => { findPhotoInput(root, ctx, stepId)?.click(); },
       });
     }
   });
