@@ -22,6 +22,7 @@ const state = {
 };
 
 let objectUrls = [];
+const lastKnownStatus = {}; // date -> status, used to only "pop" the pill on change
 
 function todayStr() {
   const d = new Date();
@@ -144,53 +145,75 @@ function parseHash() {
 }
 
 function setActiveNav(route) {
-  for (const a of navEl.querySelectorAll('a')) {
-    a.classList.toggle('active', a.dataset.route === route);
-  }
+  const links = [...navEl.querySelectorAll('a')];
+  let activeIndex = 0;
+  links.forEach((a, i) => {
+    const isActive = a.dataset.route === route;
+    a.classList.toggle('active', isActive);
+    if (isActive) activeIndex = i;
+  });
+  navEl.style.setProperty('--nav-index', activeIndex);
+  navEl.style.setProperty('--nav-count', links.length);
 }
+
+let previousRoute = null;
 
 async function render() {
   revokeObjectUrls();
+  const scrollY = window.scrollY;
 
+  let route;
   if (!state.config) {
     navEl.style.display = 'none';
+    route = 'setup';
     appEl.innerHTML = renderSetupScreen();
     attachSetupHandlers();
-    return;
-  }
-  navEl.style.display = 'flex';
+  } else {
+    navEl.style.display = 'flex';
+    const parts = parseHash();
+    route = parts[0] || 'today';
+    setActiveNav(route === 'day' ? 'calendar' : route);
 
-  const parts = parseHash();
-  const route = parts[0] || 'today';
-  setActiveNav(route === 'day' ? 'calendar' : route);
-
-  switch (route) {
-    case 'today':
-      appEl.innerHTML = renderDayScreen(todayStr(), true);
-      attachDayHandlers(todayStr());
-      await hydratePhotos(appEl);
-      break;
-    case 'day': {
-      const date = parts[1] || todayStr();
-      appEl.innerHTML = renderDayScreen(date, false);
-      attachDayHandlers(date);
-      await hydratePhotos(appEl);
-      break;
+    switch (route) {
+      case 'today':
+        appEl.innerHTML = renderDayScreen(todayStr(), true);
+        attachDayHandlers(todayStr());
+        await hydratePhotos(appEl);
+        break;
+      case 'day': {
+        const date = parts[1] || todayStr();
+        appEl.innerHTML = renderDayScreen(date, false);
+        attachDayHandlers(date);
+        await hydratePhotos(appEl);
+        break;
+      }
+      case 'calendar':
+        appEl.innerHTML = renderCalendarScreen(parts[1]);
+        attachCalendarHandlers();
+        break;
+      case 'overview':
+        appEl.innerHTML = renderOverviewScreen();
+        attachOverviewHandlers();
+        break;
+      case 'settings':
+        appEl.innerHTML = renderSettingsScreen();
+        attachSettingsHandlers();
+        break;
+      default:
+        location.hash = '#/today';
+        return;
     }
-    case 'calendar':
-      appEl.innerHTML = renderCalendarScreen(parts[1]);
-      attachCalendarHandlers();
-      break;
-    case 'overview':
-      appEl.innerHTML = renderOverviewScreen();
-      attachOverviewHandlers();
-      break;
-    case 'settings':
-      appEl.innerHTML = renderSettingsScreen();
-      attachSettingsHandlers();
-      break;
-    default:
-      location.hash = '#/today';
+  }
+
+  const routeChanged = route !== previousRoute;
+  previousRoute = route;
+  appEl.classList.remove('screen-enter');
+  if (routeChanged) {
+    void appEl.offsetWidth; // restart the CSS animation
+    appEl.classList.add('screen-enter');
+    window.scrollTo(0, 0);
+  } else {
+    window.scrollTo(0, scrollY);
   }
 }
 
@@ -316,7 +339,7 @@ function stepFieldHtml(step, entry, editable, date) {
   if (step.requiresPhoto) {
     if (photoId) html += `<img class="thumb" data-photo-id="${photoId}" alt="${esc(step.name)} photo" />`;
     if (editable) {
-      html += `<input type="file" accept="image/*" capture="environment" class="step-photo-input" data-step-id="${step.id}" />`;
+      html += `<label class="file-btn secondary">${photoId ? 'Replace photo' : 'Take photo'}<input type="file" accept="image/*" capture="environment" class="step-photo-input visually-hidden-file" data-step-id="${step.id}" /></label>`;
     } else if (!photoId) {
       html += `<p class="readonly-note">No photo</p>`;
     }
@@ -372,15 +395,18 @@ function renderDayScreen(date, isTodayRoute) {
   const dayNumber = state.lastEvaluation ? state.lastEvaluation.currentDayNumber : null;
   const isFuture = date > today;
 
+  const statusChanged = lastKnownStatus[date] !== undefined && lastKnownStatus[date] !== status;
+  lastKnownStatus[date] = status;
+
   let html = '';
   html += `<h1>${esc(config.name)}</h1>`;
   if (isTodayRoute) {
-    html += `<p>Day ${dayNumber} of ${config.totalDays}</p>`;
+    html += `<p class="day-headline">Day <span class="day-number">${dayNumber}</span> of ${config.totalDays}</p>`;
     html += weekProgressHtml(date);
   } else {
     html += `<p>${date}${date === today ? ' (today)' : ''}</p>`;
   }
-  html += `<div class="row space-between"><span class="status-pill ${status}">${status.toUpperCase()}</span>`;
+  html += `<div class="row space-between"><span class="status-pill ${status}${statusChanged ? ' pop' : ''}">${status.toUpperCase()}</span>`;
   if (!editable && !isFuture) html += `<span class="readonly-note">Locked (read-only)</span>`;
   html += `</div>`;
 
@@ -395,7 +421,7 @@ function renderDayScreen(date, isTodayRoute) {
   html += `<input type="number" step="0.1" id="weight-input" value="${day.weight ?? ''}" ${editable ? '' : 'disabled'} /></div>`;
   if (day.bodyPhotoId) html += `<img class="thumb" data-photo-id="${day.bodyPhotoId}" alt="Body check-in photo" />`;
   if (editable) {
-    html += `<input type="file" accept="image/*" capture="environment" id="body-photo-input" />`;
+    html += `<label class="file-btn secondary">${day.bodyPhotoId ? 'Replace photo' : 'Take photo'}<input type="file" accept="image/*" capture="environment" id="body-photo-input" class="visually-hidden-file" /></label>`;
   } else if (!day.bodyPhotoId) {
     html += `<p class="readonly-note">No photo</p>`;
   }
