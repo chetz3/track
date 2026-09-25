@@ -78,9 +78,19 @@ body { padding: env(safe-area-inset-top) 0 calc(96px + env(safe-area-inset-botto
 .field-label { flex: none; color: var(--text2); }
 .field-unit { flex: none; color: var(--text2); }
 .photo-field-btn { flex: 1; height: 40px; }
+.row > .btn-pair { flex: 1; } /* the pair fills the row's width, same as a lone .photo-field-btn did */
 .row:has(textarea) { align-items: flex-start; }
 .invalid { color: var(--red) !important; }
 .ro-check { flex: none; font-weight: 700; color: var(--text2); }
 .ro-check.done { color: var(--green); }
+.section-footer.photo-error { color: var(--red); padding-top: 4px; }
 @keyframes pillPop { 0% { transform: scale(1); } 50% { transform: scale(1.08); } 100% { transform: scale(1); } }
 .pill.pop { animation: pillPop .3s var(--ease); }
+
+/* Camera sheet (Task 6A) */
+.camera-body { display: flex; flex-direction: column; gap: 12px; }
+.camera-explainer { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 12px 0; text-align: center; }
+.camera-icon { width: 56px; height: 56px; color: var(--text2); }
+.camera-message { margin: 0; font-size: 17px; color: var(--text); }
+.camera-message.error { color: var(--red); }
+.camera-video { width: 100%; aspect-ratio: 3 / 4; border-radius: 12px; background: #000; object-fit: cover; }

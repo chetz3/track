@@ -2,6 +2,11 @@
 // before storing them as JPEG blobs in the `photos` IndexedDB store.
 
 import { put, get, del } from './db.js';
+import { exifDate, localDateFromMs } from './exif.js';
+
+// First 128KiB is enough to cover a JPEG's Exif APP1 segment (it always sits
+// right after the SOI marker) without reading the whole file into memory.
+const EXIF_SNIFF_BYTES = 131072;
 
 const MAX_DIMENSION = 1080;
 const JPEG_QUALITY = 0.7;
@@ -69,4 +74,13 @@ export async function getPhotoUrl(id) {
 export async function deletePhoto(id) {
   if (!id) return;
   await del('photos', id);
+}
+
+// The local calendar date a photo was actually taken on: Exif
+// DateTimeOriginal/DateTime when present (camera photos, most library
+// photos), falling back to the file's lastModified (screenshots, camera
+// captures we mint ourselves, Exif-stripped files).
+export async function photoDateOf(file) {
+  const buffer = await file.slice(0, EXIF_SNIFF_BYTES).arrayBuffer();
+  return exifDate(buffer) ?? localDateFromMs(file.lastModified);
 }

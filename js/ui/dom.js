@@ -24,6 +24,14 @@ export function formatMonthLong(y, m) {
   return `${MONTH_FULL[m - 1]} ${y}`;
 }
 
+// "Thu, 25 Sep" — like formatDateLong but without the year, for messages
+// that name a specific day inline (photo-date mismatch warning).
+export function formatDateShort(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return `${WEEKDAY_ABBR[dt.getDay()]}, ${d} ${MONTH_ABBR[m - 1]}`;
+}
+
 // Object URLs handed out by hydratePhotos, tracked per render/sheet scope
 // (the nearest `[data-render-root]` ancestor of the element hydratePhotos
 // was called on) rather than in one global list. A screen's own photos must

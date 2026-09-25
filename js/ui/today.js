@@ -7,8 +7,9 @@
 
 import * as store from '../store.js';
 import { dayStatus, isEditable, isStepComplete, parseNumberInput, addDays, diffDays } from '../rules.js';
-import { savePhoto } from '../photos.js';
-import { esc, formatDateLong, hydratePhotos, readFileAsPhoto } from './dom.js';
+import { savePhoto, photoDateOf } from '../photos.js';
+import { esc, formatDateLong, formatDateShort, hydratePhotos, readFileAsPhoto } from './dom.js';
+import { openCamera } from './camera.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -36,6 +37,13 @@ let current = null;
 // keystrokes and closing the on-screen keyboard. Cleared once focus truly
 // leaves our fields (see wireDelegation's focusout handler).
 let focusRecord = null;
+
+// Photo-date mismatch message per step, keyed the same way as expandedKey
+// (`${challengeId}:${date}:${stepId}`), shown as an inline red footer under
+// the photo row until the step is re-collapsed/expanded, a matching photo is
+// saved, or the screen navigates to a different challenge/day (see
+// renderScreen's key check).
+const photoErrorByKey = new Map();
 
 const PILL_LABELS = { green: 'Complete', red: 'Missed', pending: 'In progress', future: 'Upcoming', outside: 'Outside attempt' };
 
@@ -114,14 +122,17 @@ function stepSummaryHtml(step, entry) {
 // fieldContext) instead of a shared module variable that a later render
 // (of a different challenge/day) would have already overwritten by the
 // time an in-flight async action — e.g. the photo picker — resolves.
-function photoRowHtml(step, entry, fieldCtx) {
-  const label = entry.photoId ? 'Replace photo' : 'Take photo';
-  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <span class="field-label">Photo</span>
-    <label class="btn btn-secondary photo-field-btn">${esc(label)}
-      <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}" />
-    </label>
+function photoRowHtml(step, entry, fieldCtx, errorMessage) {
+  const rowHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <div class="btn-pair">
+      <button type="button" class="btn btn-primary photo-field-btn" data-role="camera-btn" data-step-id="${esc(step.id)}">Take photo</button>
+      <label class="btn btn-secondary photo-field-btn">Library
+        <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}" />
+      </label>
+    </div>
   </div>`;
+  const footerHtml = errorMessage ? `<div class="section-footer photo-error">${esc(errorMessage)}</div>` : '';
+  return rowHtml + footerHtml;
 }
 
 function numberRowHtml(step, entry, fieldCtx) {
@@ -143,7 +154,10 @@ function noteRowHtml(step, entry, fieldCtx) {
 
 function expandedRowsHtml(step, entry, fieldCtx) {
   let html = '';
-  if (step.photo !== 'none') html += photoRowHtml(step, entry, fieldCtx);
+  if (step.photo !== 'none') {
+    const errorMessage = photoErrorByKey.get(`${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`);
+    html += photoRowHtml(step, entry, fieldCtx, errorMessage);
+  }
   if (step.number) html += numberRowHtml(step, entry, fieldCtx);
   if (step.note !== 'none') html += noteRowHtml(step, entry, fieldCtx);
   return html;
@@ -252,6 +266,28 @@ function restoreFocus(root, challengeId, date) {
   el.focus({ preventScroll: true });
 }
 
+// ---------- photo save (shared by the camera and the library picker) ----------
+
+// Both photo paths — the in-app camera and the library file input — funnel
+// through here so the "must match the day being logged" rule applies
+// identically. `ctx`/`stepId` are read off the DOM at the moment the user
+// acted (see fieldContext), not off the shared `current` box, so a photo
+// that resolves after the user has navigated away still saves (or is
+// rejected) against the row it was opened for.
+async function handlePhotoFile(ctx, stepId, file) {
+  if (!file) return;
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  const photoDate = await photoDateOf(file);
+  if (photoDate !== ctx.date) {
+    photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
+    current?.rerender();
+    return;
+  }
+  photoErrorByKey.delete(key);
+  const photoId = await savePhoto(file);
+  await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
+}
+
 // ---------- delegated event wiring (attached once per root) ----------
 
 function wireDelegation(root) {
@@ -276,8 +312,23 @@ function wireDelegation(root) {
     const stepRow = e.target.closest('[data-role="step-row"]');
     if (stepRow && !e.target.closest('[data-role="check"]')) {
       const stepId = stepRow.dataset.stepId;
+      const rowCtx = fieldContext(stepRow);
+      if (rowCtx) photoErrorByKey.delete(`${rowCtx.challengeId}:${rowCtx.date}:${stepId}`);
       expandedStepId = expandedStepId === stepId ? null : stepId;
       current?.rerender();
+      return;
+    }
+
+    const cameraBtn = e.target.closest('[data-role="camera-btn"]');
+    if (cameraBtn) {
+      const ctx = fieldContext(cameraBtn);
+      if (!ctx) return;
+      const stepId = cameraBtn.dataset.stepId;
+      const row = cameraBtn.closest('.row');
+      openCamera({
+        onCapture: (file) => { handlePhotoFile(ctx, stepId, file); },
+        onUseLibrary: () => { row?.querySelector('[data-role="photo-input"]')?.click(); },
+      });
     }
   });
 
@@ -297,9 +348,15 @@ function wireDelegation(root) {
       if (!ctx) return;
       const stepId = numberInput.dataset.stepId;
       const raw = numberInput.value;
+      const matchesFocusRecord = () =>
+        focusRecord && focusRecord.role === 'number' && focusRecord.stepId === stepId &&
+        focusRecord.challengeId === ctx.challengeId && focusRecord.date === ctx.date;
       if (raw.trim() === '') {
         numberInput.classList.remove('invalid');
         await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: undefined });
+        // Field still owns the record: nothing typed left to write back over
+        // the now-cleared stored value on the next re-render.
+        if (matchesFocusRecord()) focusRecord.value = '';
         return;
       }
       const parsed = parseNumberInput(raw);
@@ -309,6 +366,10 @@ function wireDelegation(root) {
       }
       numberInput.classList.remove('invalid');
       await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: parsed });
+      // Normalise the tracked value to what was actually stored (e.g. "3,5"
+      // -> "3.5") so restoreFocus doesn't write the raw comma form back over
+      // it on the next store-driven re-render.
+      if (matchesFocusRecord()) focusRecord.value = String(parsed);
       return;
     }
 
@@ -327,9 +388,8 @@ function wireDelegation(root) {
       if (!ctx) return;
       const stepId = photoInput.dataset.stepId;
       const file = readFileAsPhoto(photoInput);
-      if (!file) return;
-      const photoId = await savePhoto(file);
-      await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
+      photoInput.value = ''; // allow re-picking the same file (e.g. after a rejection)
+      await handlePhotoFile(ctx, stepId, file);
       return;
     }
   });
@@ -348,6 +408,15 @@ async function renderScreen(root, { date, dayRoute }) {
   if (expandedKey !== key) {
     expandedKey = key;
     expandedStepId = null;
+    // The user left this challenge/day. A focused field's focusout may not
+    // have fired yet (Safari/Firefox don't reliably fire it on removal), so
+    // without this focusRecord would sit around describing a field that no
+    // longer exists on screen and could wrongly resurrect a stale typed
+    // value if a same-named step/date/challenge combo is ever rendered
+    // again later. Restoring is only ever valid within one screen's
+    // lifetime, so the record doesn't survive a screen change.
+    focusRecord = null;
+    photoErrorByKey.clear();
   }
 
   const todayStr = store.today();

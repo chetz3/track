@@ -10,7 +10,7 @@ let seq = 0;
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function openSheet({ title, bodyHtml, onMount }) {
+export function openSheet({ title, bodyHtml, onMount, onClose }) {
   closeSheet(true);
 
   const id = ++seq;
@@ -47,7 +47,7 @@ export function openSheet({ title, bodyHtml, onMount }) {
   document.addEventListener('keydown', onKeydown);
 
   const previousFocus = document.activeElement;
-  current = { id, backdrop, sheet, onKeydown, previousFocus };
+  current = { id, backdrop, sheet, onKeydown, previousFocus, onClose };
 
   const target = sheet.querySelector(FOCUSABLE_SELECTOR) || sheet;
   target.focus();
@@ -58,12 +58,17 @@ export function openSheet({ title, bodyHtml, onMount }) {
 
 export function closeSheet(immediate = false) {
   if (!current) return;
-  const { backdrop, sheet, onKeydown, previousFocus } = current;
+  const { backdrop, sheet, onKeydown, previousFocus, onClose } = current;
   current = null;
   document.removeEventListener('keydown', onKeydown);
   if (previousFocus && document.contains(previousFocus)) {
     previousFocus.focus();
   }
+  // Runs on every close path — Escape, backdrop tap, the sheet's own close(),
+  // and being superseded by a new openSheet() — so a caller with a live
+  // resource (e.g. camera.js's getUserMedia stream) has exactly one place to
+  // release it.
+  onClose?.();
   if (immediate) { backdrop.remove(); sheet.remove(); revokePhotosIn(sheet); return; }
   backdrop.classList.remove('open');
   sheet.classList.remove('open');
