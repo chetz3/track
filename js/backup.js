@@ -12,9 +12,33 @@ function blobToBase64(blob) {
   });
 }
 
-async function base64ToBlob(dataUrl) {
-  const res = await fetch(dataUrl);
-  return res.blob();
+const PHOTO_DATA_URL_RE = /^data:image\/[a-z+.-]+;base64,/;
+const DATE_STR_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function hasStringId(record) {
+  return !!record && typeof record.id === 'string' && record.id.length > 0;
+}
+
+function hasDateKey(day) {
+  return !!day && typeof day.date === 'string' && DATE_STR_RE.test(day.date);
+}
+
+// Decodes a data: URL to a Blob by hand (atob), never via fetch() — fetch()
+// treats a malformed/non-data-URL string as a relative URL and will
+// silently fetch and store an unrelated page as the "photo".
+function decodePhotoDataUrl(dataUrl) {
+  const match = typeof dataUrl === 'string' && PHOTO_DATA_URL_RE.exec(dataUrl);
+  if (!match) throw new Error('Invalid backup file');
+  const mime = dataUrl.slice('data:'.length, dataUrl.indexOf(';'));
+  let binary;
+  try {
+    binary = atob(dataUrl.slice(match[0].length));
+  } catch (_) {
+    throw new Error('Invalid backup file');
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
 }
 
 function downloadFile(text, filename) {
@@ -72,8 +96,8 @@ export async function exportBackup() {
 
 // Replaces ALL data in the database with the contents of the backup.
 // Caller is responsible for confirming with the user first.
-// Everything is parsed and decoded BEFORE any existing data is cleared, so
-// a corrupt/partial file fails loudly without wiping the user's data.
+// Everything is validated and decoded BEFORE any existing data is cleared,
+// so a corrupt/partial file fails loudly without wiping the user's data.
 export async function importBackup(jsonText) {
   const backup = JSON.parse(jsonText);
   if (!backup || typeof backup !== 'object' || !Array.isArray(backup.days)) {
@@ -82,11 +106,18 @@ export async function importBackup(jsonText) {
   const config = Array.isArray(backup.config) ? backup.config : [];
   const attempts = Array.isArray(backup.attempts) ? backup.attempts : [];
   const days = backup.days;
-  const photoRecords = [];
-  for (const p of backup.photos || []) {
-    const blob = await base64ToBlob(p.data);
-    photoRecords.push({ id: p.id, blob, createdAt: p.createdAt });
-  }
+  const photos = Array.isArray(backup.photos) ? backup.photos : [];
+
+  if (!config.every(hasStringId)) throw new Error('Invalid backup file');
+  if (!attempts.every(hasStringId)) throw new Error('Invalid backup file');
+  if (!days.every(hasDateKey)) throw new Error('Invalid backup file');
+  if (!photos.every(hasStringId)) throw new Error('Invalid backup file');
+
+  const photoRecords = photos.map((p) => ({
+    id: p.id,
+    blob: decodePhotoDataUrl(p.data),
+    createdAt: p.createdAt,
+  }));
 
   await clearAll();
   for (const c of config) await put('config', c);
