@@ -11,6 +11,7 @@
 
 import * as store from './store.js';
 import { esc, revokePhotosIn } from './ui/dom.js';
+import { renderToday, renderDay } from './ui/today.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -29,8 +30,8 @@ function placeholder(title) {
 // Single route table: route name -> render(root, params). Later tasks swap
 // individual entries for the real screen module's render function.
 const ROUTES = {
-  today: placeholder('Today'),
-  day: placeholder('Day'),
+  today: renderToday,
+  day: (root, params) => renderDay(root, params.date),
   calendar: placeholder('Calendar'),
   overview: placeholder('Overview'),
   stats: placeholder('Stats'),
