@@ -18,6 +18,7 @@ import { exportBackup, importBackup } from '../backup.js';
 import { esc, formatDateShort } from './dom.js';
 import { miniRing } from './today.js';
 import { openStepEditor } from './stepEditor.js';
+import { closeSheet } from './sheet.js';
 
 const LAST_EXPORT_KEY = 'tracker:lastExportAt';
 
@@ -49,7 +50,15 @@ function markExported() {
 // Hidden file input + confirm() + importBackup, shared by the Challenges
 // screen's Import button and app.js's empty-state "Import backup" stub.
 // Self-contained: doesn't depend on any particular screen being mounted.
-export function importBackupFlow() {
+//
+// One input is created lazily and reused for every call — a cancelled file
+// picker never fires a usable event on some browsers, so an input created
+// fresh per tap and only removed from its own 'change' handler would leak
+// an abandoned hidden <input> into the document on every cancel.
+let importInputEl = null;
+
+function getImportInput() {
+  if (importInputEl) return importInputEl;
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json,application/json';
@@ -59,18 +68,19 @@ export function importBackupFlow() {
   input.addEventListener('change', async () => {
     const file = input.files && input.files[0];
     input.value = ''; // allow re-picking the same file
-    if (!file) {
-      input.remove();
-      return;
-    }
-    if (!confirm('This replaces ALL data on this device with the backup. Continue?')) {
-      input.remove();
-      return;
-    }
+    if (!file) return;
+    if (!confirm('This replaces ALL data on this device with the backup. Continue?')) return;
     try {
       const text = await file.text();
       await importBackup(text);
       await store.loadAll();
+      // A stale pre-import form draft (e.g. left over from editing a
+      // challenge that no longer exists post-import) must never reappear
+      // over the freshly-imported data. The hashchange below also clears it,
+      // but clear it here too since the hash may already read '#/today'.
+      formKey = null;
+      formDraft = null;
+      formError = '';
       location.hash = '#/today';
       // store.loadAll() doesn't itself notify listeners, and if the hash was
       // already '#/today' (e.g. imported from the empty state, which has no
@@ -79,12 +89,15 @@ export function importBackupFlow() {
       window.dispatchEvent(new Event('hashchange'));
     } catch (err) {
       alert('Import failed: ' + err.message);
-    } finally {
-      input.remove();
     }
   });
 
-  input.click();
+  importInputEl = input;
+  return input;
+}
+
+export function importBackupFlow() {
+  getImportInput().click();
 }
 
 // ---------- challenges list (#/challenges) ----------
@@ -130,10 +143,14 @@ function wireChallengesDelegation(root) {
       return;
     }
     if (e.target.closest('[data-role="export-btn"]')) {
-      const result = await exportBackup();
-      if (result.method === 'share' || result.method === 'download') {
-        markExported();
-        if (challengesCurrent) await renderChallenges(challengesCurrent.root);
+      try {
+        const result = await exportBackup();
+        if (result.method === 'share' || result.method === 'download') {
+          markExported();
+          if (challengesCurrent) await renderChallenges(challengesCurrent.root);
+        }
+      } catch (err) {
+        alert('Export failed: ' + err.message);
       }
       return;
     }
@@ -176,6 +193,35 @@ let formKey = null;
 let formDraft = null;
 let formError = '';
 let current = null; // { root, idParam, isNew, rerender }
+// True while a Save/Create or Delete request is in flight, so a double-tap
+// can't fire it twice (e.g. create two challenges, or delete-then-delete).
+let saving = false;
+
+// The hash the currently-drafted form corresponds to ('#/challenges/new' or
+// '#/challenges/<id>'), or null when there's no draft. Used below to detect
+// "the user actually navigated to a different form" vs. "a store-driven
+// re-render just replaced the container" (which never changes the hash).
+function currentFormRoute() {
+  if (formKey === null) return null;
+  return formKey === 'new' ? '#/challenges/new' : `#/challenges/${formKey}`;
+}
+
+// Registered once at module load. Real navigation (tapping another tab,
+// leaving the form, coming back) always changes location.hash; a
+// store-driven re-render of the same form never does. So this only fires
+// when the user has actually left the form the draft belongs to, and is the
+// single place that discards a stale draft — closing any step-editor sheet
+// left open (it belongs to whichever form is being left) at the same time,
+// so it can't later push an edit into a different form's draft.
+window.addEventListener('hashchange', () => {
+  closeSheet();
+  const route = currentFormRoute();
+  if (route !== null && location.hash !== route) {
+    formKey = null;
+    formDraft = null;
+    formError = '';
+  }
+});
 
 function cloneStepForDraft(s) {
   return { id: s.id, name: s.name, mandatory: !!s.mandatory, photo: s.photo, number: s.number ? { ...s.number } : null, note: s.note };
@@ -230,7 +276,7 @@ function historyHtml(challengeId) {
   </div>`;
 }
 
-function buildFormHtml({ draft, error, isNew, challenge }) {
+function buildFormHtml({ draft, error, isNew, challenge, saving }) {
   const title = isNew ? 'New Challenge' : esc(challenge.name);
 
   const startDateRow = isNew ? `<div class="row">
@@ -266,10 +312,11 @@ function buildFormHtml({ draft, error, isNew, challenge }) {
   </div>`;
 
   const errorHtml = error ? `<div class="section-footer error">${esc(error)}</div>` : '';
-  const saveHtml = `<button type="button" class="btn btn-primary" data-role="save">${isNew ? 'Create challenge' : 'Save'}</button>`;
+  const disabledAttr = saving ? 'disabled' : '';
+  const saveHtml = `<button type="button" class="btn btn-primary" data-role="save" ${disabledAttr}>${isNew ? 'Create challenge' : 'Save'}</button>`;
 
   const historyAndDelete = isNew ? '' : `${historyHtml(challenge.id)}
-    <button type="button" class="btn btn-danger" data-role="delete-challenge">Delete challenge</button>`;
+    <button type="button" class="btn btn-danger" data-role="delete-challenge" ${disabledAttr}>Delete challenge</button>`;
 
   return `<h1 class="large-title">${title}</h1>
     ${detailsHtml}
@@ -280,7 +327,7 @@ function buildFormHtml({ draft, error, isNew, challenge }) {
 }
 
 async function handleSave() {
-  if (!current || !formDraft) return;
+  if (!current || !formDraft || saving) return;
   const { idParam, isNew } = current;
   const input = {
     name: formDraft.name.trim(),
@@ -297,6 +344,8 @@ async function handleSave() {
     return;
   }
 
+  saving = true;
+  current.rerender();
   try {
     if (isNew) {
       await store.createChallenge(input);
@@ -306,24 +355,36 @@ async function handleSave() {
     formKey = null;
     formDraft = null;
     formError = '';
+    saving = false;
     location.hash = '#/challenges';
   } catch (err) {
     formError = err.message;
+    saving = false;
     current.rerender();
   }
 }
 
 async function handleDeleteChallenge() {
-  if (!current) return;
+  if (!current || saving) return;
   const { idParam } = current;
   const challenge = store.state.challenges.find((c) => c.id === idParam);
   if (!challenge) return;
   if (!confirm(`Delete "${challenge.name}"? This removes all its days and photos and can't be undone.`)) return;
-  await store.deleteChallenge(idParam);
-  formKey = null;
-  formDraft = null;
-  formError = '';
-  location.hash = '#/challenges';
+
+  saving = true;
+  current.rerender();
+  try {
+    await store.deleteChallenge(idParam);
+    formKey = null;
+    formDraft = null;
+    formError = '';
+    saving = false;
+    location.hash = '#/challenges';
+  } catch (err) {
+    saving = false;
+    alert('Delete failed: ' + err.message);
+    current.rerender();
+  }
 }
 
 function wireFormDelegation(root) {
@@ -416,6 +477,6 @@ export async function renderChallengeForm(root, idParam) {
 
   current = { root, idParam, isNew, rerender: () => renderChallengeForm(root, idParam) };
 
-  root.innerHTML = buildFormHtml({ draft: formDraft, error: formError, isNew, challenge });
+  root.innerHTML = buildFormHtml({ draft: formDraft, error: formError, isNew, challenge, saving });
   wireFormDelegation(root);
 }
