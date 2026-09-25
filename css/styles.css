@@ -89,6 +89,12 @@ body { padding: env(safe-area-inset-top) 0 calc(96px + env(safe-area-inset-botto
 @keyframes pillPop { 0% { transform: scale(1); } 50% { transform: scale(1.08); } 100% { transform: scale(1); } }
 .pill.pop { animation: pillPop .3s var(--ease); }
 
+/* Challenges list, challenge form, step editor (Task 7) */
+.item-sub { font-size: 13px; color: var(--text2); margin-top: 2px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-left: 6px; vertical-align: middle; }
+.add-step-label { color: var(--accent); font-weight: 600; }
+.section-footer.error { color: var(--red); }
+
 /* Camera sheet (Task 6A) */
 .camera-body { display: flex; flex-direction: column; gap: 12px; }
 .camera-explainer { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 12px 0; text-align: center; }

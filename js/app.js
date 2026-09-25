@@ -12,6 +12,7 @@
 import * as store from './store.js';
 import { esc, revokePhotosIn } from './ui/dom.js';
 import { renderToday, renderDay } from './ui/today.js';
+import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -35,9 +36,9 @@ const ROUTES = {
   calendar: placeholder('Calendar'),
   overview: placeholder('Overview'),
   stats: placeholder('Stats'),
-  challenges: placeholder('Challenges'),
-  'challenges/new': placeholder('New Challenge'),
-  'challenges/:id': placeholder('Challenge'),
+  challenges: renderChallenges,
+  'challenges/new': (root) => renderChallengeForm(root, 'new'),
+  'challenges/:id': (root, params) => renderChallengeForm(root, params.id),
   'summary/:date': placeholder('Summary'),
 };
 
@@ -102,8 +103,7 @@ function renderEmptyState(root) {
     location.hash = '#/challenges/new';
   });
   root.querySelector('#empty-import-btn').addEventListener('click', () => {
-    // Stub: real import lives in the Challenges module (Task 7).
-    location.hash = '#/challenges';
+    importBackupFlow();
   });
 }
 
