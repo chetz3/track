@@ -3,7 +3,7 @@
 // replace the placeholder entries one at a time without touching this file.
 
 import * as store from './store.js';
-import { esc } from './ui/dom.js';
+import { esc, revokePhotoUrls } from './ui/dom.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -102,8 +102,9 @@ function renderEmptyState(root) {
 // ---------- render loop ----------
 
 let previousTop = null;
-let previousKey = null;
+let previousScrollKey = null;
 let renderScheduled = false;
+let renderSeq = 0;
 
 function scheduleRender() {
   if (renderScheduled) return;
@@ -114,14 +115,30 @@ function scheduleRender() {
   });
 }
 
+// Distinguishes "the same screen, re-rendered" (restore scroll position)
+// from "a different screen under the same route name" (e.g. switching
+// which day or which challenge is shown), which should scroll to top.
+function routeScrollKey(key, params) {
+  if (key === 'day') return `day:${params.date}`;
+  if (key === 'calendar') return `calendar:${params.month || ''}`;
+  if (key === 'challenges/:id') return `challenges/:id:${params.id}`;
+  if (key === 'summary/:date') return `summary/:date:${params.date}`;
+  return key;
+}
+
+// Renders are async (screen modules may await data/photos), so a slower
+// render started earlier can finish after a newer one. Each call gets a
+// token; a render whose token is no longer current when its work finishes
+// is discarded before it touches the DOM or any bookkeeping. The new
+// screen is built in a detached container so a stale render never mutates
+// #app, even partially.
 async function render() {
+  const token = ++renderSeq;
   const scrollY = window.scrollY;
   const hasChallenges = store.state.challenges.length > 0;
   const { top, key, params } = matchRoute();
 
-  appEl.classList.remove('enter');
-  appEl.innerHTML = '';
-
+  const container = document.createElement('div');
   let effectiveTop = top;
   let effectiveKey = key;
   let showTabbar = hasChallenges;
@@ -129,21 +146,28 @@ async function render() {
   if (!hasChallenges && key !== 'challenges/new') {
     effectiveTop = 'empty';
     effectiveKey = 'empty';
-    renderEmptyState(appEl);
+    renderEmptyState(container);
     showTabbar = false;
   } else {
     if (key === 'challenges/new' && !hasChallenges) showTabbar = false;
     const renderFn = ROUTES[key] || ROUTES.today;
-    await renderFn(appEl, params);
+    await renderFn(container, params);
   }
 
-  setActiveTab(effectiveTop === 'empty' ? 'today' : top);
-  tabbarEl.style.display = showTabbar ? '' : 'none';
+  if (token !== renderSeq) return; // a newer render has since started; discard this one
 
+  revokePhotoUrls(); // safe now: this render's photos are already hydrated onto `container`
+  appEl.classList.remove('enter');
+  appEl.replaceChildren(...container.childNodes);
+
+  setActiveTab(effectiveTop === 'empty' ? 'today' : top);
+  tabbarEl.hidden = !showTabbar;
+
+  const scrollKey = routeScrollKey(effectiveKey, params);
   const topChanged = effectiveTop !== previousTop;
-  const sameRoute = effectiveKey === previousKey;
+  const sameRoute = scrollKey === previousScrollKey;
   previousTop = effectiveTop;
-  previousKey = effectiveKey;
+  previousScrollKey = scrollKey;
 
   if (topChanged) {
     void appEl.offsetWidth; // restart the CSS animation
