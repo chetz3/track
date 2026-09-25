@@ -72,18 +72,26 @@ export async function exportBackup() {
 
 // Replaces ALL data in the database with the contents of the backup.
 // Caller is responsible for confirming with the user first.
+// Everything is parsed and decoded BEFORE any existing data is cleared, so
+// a corrupt/partial file fails loudly without wiping the user's data.
 export async function importBackup(jsonText) {
   const backup = JSON.parse(jsonText);
   if (!backup || typeof backup !== 'object' || !Array.isArray(backup.days)) {
     throw new Error('Invalid backup file');
   }
-  await clearAll();
-  for (const c of backup.config || []) await put('config', c);
-  for (const a of backup.attempts || []) await put('attempts', a);
-  for (const d of backup.days || []) await put('days', d);
+  const config = Array.isArray(backup.config) ? backup.config : [];
+  const attempts = Array.isArray(backup.attempts) ? backup.attempts : [];
+  const days = backup.days;
+  const photoRecords = [];
   for (const p of backup.photos || []) {
     const blob = await base64ToBlob(p.data);
-    await put('photos', { id: p.id, blob, createdAt: p.createdAt });
+    photoRecords.push({ id: p.id, blob, createdAt: p.createdAt });
   }
+
+  await clearAll();
+  for (const c of config) await put('config', c);
+  for (const a of attempts) await put('attempts', a);
+  for (const d of days) await put('days', d);
+  for (const p of photoRecords) await put('photos', p);
   return backup;
 }
