@@ -1,9 +1,14 @@
 // Router + tab bar + boot. Screens are plain modules exported as
 // `render(root, params)` and wired into the ROUTES table below; Tasks 6-9
 // replace the placeholder entries one at a time without touching this file.
+//
+// Render contract: screens receive an attached container (a live descendant
+// of #app, already in the document); they may measure it (clientWidth,
+// getBoundingClientRect, etc.); they must only write inside it — never touch
+// #app or any sibling directly.
 
 import * as store from './store.js';
-import { esc, revokePhotoUrls } from './ui/dom.js';
+import { esc, revokePhotosIn } from './ui/dom.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -129,9 +134,14 @@ function routeScrollKey(key, params) {
 // Renders are async (screen modules may await data/photos), so a slower
 // render started earlier can finish after a newer one. Each call gets a
 // token; a render whose token is no longer current when its work finishes
-// is discarded before it touches the DOM or any bookkeeping. The new
-// screen is built in a detached container so a stale render never mutates
-// #app, even partially.
+// is discarded before it touches any bookkeeping (its container was already
+// swapped out by the newer render, and any of its photos that were still
+// loading are revoked immediately by hydratePhotos' isConnected check).
+//
+// The new screen's container is attached to #app up front, *before*
+// renderFn runs, so screens can measure themselves (clientWidth,
+// getBoundingClientRect, ...) during their own render — a detached node
+// always measures as zero.
 async function render() {
   const token = ++renderSeq;
   const scrollY = window.scrollY;
@@ -139,6 +149,12 @@ async function render() {
   const { top, key, params } = matchRoute();
 
   const container = document.createElement('div');
+  container.dataset.renderRoot = '';
+
+  const old = appEl.firstElementChild;
+  appEl.replaceChildren(container);
+  if (old) revokePhotosIn(old);
+
   let effectiveTop = top;
   let effectiveKey = key;
   let showTabbar = hasChallenges;
@@ -154,11 +170,7 @@ async function render() {
     await renderFn(container, params);
   }
 
-  if (token !== renderSeq) return; // a newer render has since started; discard this one
-
-  revokePhotoUrls(); // safe now: this render's photos are already hydrated onto `container`
-  appEl.classList.remove('enter');
-  appEl.replaceChildren(...container.childNodes);
+  if (token !== renderSeq) return; // a newer render has since swapped this container out; discard
 
   setActiveTab(effectiveTop === 'empty' ? 'today' : top);
   tabbarEl.hidden = !showTabbar;
@@ -170,8 +182,8 @@ async function render() {
   previousScrollKey = scrollKey;
 
   if (topChanged) {
-    void appEl.offsetWidth; // restart the CSS animation
-    appEl.classList.add('enter');
+    void container.offsetWidth; // restart the CSS animation
+    container.classList.add('enter');
     window.scrollTo(0, 0);
   } else if (sameRoute) {
     window.scrollTo(0, scrollY);

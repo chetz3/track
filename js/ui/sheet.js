@@ -2,7 +2,7 @@
 // Only one sheet may be open at a time; opening a new one closes the
 // previous immediately (no exit animation, since it's being replaced).
 
-import { esc } from './dom.js';
+import { esc, revokePhotosIn } from './dom.js';
 
 let current = null; // { id, backdrop, sheet, onKeydown, previousFocus }
 let seq = 0;
@@ -23,6 +23,7 @@ export function openSheet({ title, bodyHtml, onMount }) {
   sheet.setAttribute('aria-modal', 'true');
   sheet.setAttribute('aria-labelledby', titleId);
   sheet.setAttribute('tabindex', '-1');
+  sheet.dataset.renderRoot = ''; // hydratePhotos() inside the sheet scopes its object URLs to this element
   sheet.innerHTML = `<div class="sheet-grabber"></div><h2 class="sheet-title" id="${titleId}">${esc(title)}</h2>${bodyHtml}`;
   document.body.append(backdrop, sheet);
   requestAnimationFrame(() => { backdrop.classList.add('open'); sheet.classList.add('open'); });
@@ -63,8 +64,8 @@ export function closeSheet(immediate = false) {
   if (previousFocus && document.contains(previousFocus)) {
     previousFocus.focus();
   }
-  if (immediate) { backdrop.remove(); sheet.remove(); return; }
+  if (immediate) { backdrop.remove(); sheet.remove(); revokePhotosIn(sheet); return; }
   backdrop.classList.remove('open');
   sheet.classList.remove('open');
-  setTimeout(() => { backdrop.remove(); sheet.remove(); }, 300);
+  setTimeout(() => { backdrop.remove(); sheet.remove(); revokePhotosIn(sheet); }, 300);
 }

@@ -24,27 +24,42 @@ export function formatMonthLong(y, m) {
   return `${MONTH_FULL[m - 1]} ${y}`;
 }
 
-// Object URLs handed out by hydratePhotos, tracked so they can be revoked
-// before the next render (they're only valid for the lifetime of the DOM
-// nodes that used them).
-let objectUrls = [];
-
-export function revokePhotoUrls() {
-  for (const url of objectUrls) URL.revokeObjectURL(url);
-  objectUrls = [];
-}
+// Object URLs handed out by hydratePhotos, tracked per render/sheet scope
+// (the nearest `[data-render-root]` ancestor of the element hydratePhotos
+// was called on) rather than in one global list. A screen's own photos must
+// never be revoked by a *different* screen's render finishing later, so
+// each scope owns and revokes only the URLs it created.
+const urlsByScope = new WeakMap();
 
 export async function hydratePhotos(root) {
+  const scope = root.closest('[data-render-root]') || root;
   const imgs = root.querySelectorAll('img[data-photo-id]');
   for (const img of imgs) {
     const id = img.dataset.photoId;
     if (!id) continue;
     const url = await getPhotoUrl(id);
-    if (url) {
-      objectUrls.push(url);
-      img.src = url;
+    if (!url) continue;
+    if (!scope.isConnected) {
+      // The scope was torn down (superseded render, closed sheet) while
+      // this photo was loading — never let it leak.
+      URL.revokeObjectURL(url);
+      continue;
     }
+    img.src = url;
+    let urls = urlsByScope.get(scope);
+    if (!urls) urlsByScope.set(scope, (urls = []));
+    urls.push(url);
   }
+}
+
+// Revokes every object URL recorded for `scope` (a `[data-render-root]`
+// element) and forgets it. Callers: the router, when a screen's container
+// is superseded by the next render; the sheet, when it's removed.
+export function revokePhotosIn(scope) {
+  const urls = urlsByScope.get(scope);
+  if (!urls) return;
+  for (const url of urls) URL.revokeObjectURL(url);
+  urlsByScope.delete(scope);
 }
 
 // Reads the first selected File off a file input, or null if none chosen.
