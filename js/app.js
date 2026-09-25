@@ -29,6 +29,20 @@ function todayStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+const WEEKDAY_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function formatDateLong(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return `${WEEKDAY_ABBR[dt.getDay()]}, ${d} ${MONTH_ABBR[m - 1]} ${y}`;
+}
+
+function formatMonthLong(y, m) {
+  return `${MONTH_FULL[m - 1]} ${y}`;
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -233,9 +247,11 @@ window.addEventListener('hashchange', render);
 
 function renderSetupScreen() {
   return `
-    <h1>Set up your challenge</h1>
-    <p>This stays on your device. You can change most of this later in Settings.</p>
-    <form id="setup-form">
+    <div class="screen-header">
+      <h1>Set up your challenge</h1>
+      <p class="screen-subtitle">This stays on your device. You can change most of this later in Settings.</p>
+    </div>
+    <form id="setup-form" class="stack">
       <div class="card">
         <div class="field">
           <label for="s-name">Challenge name</label>
@@ -256,7 +272,7 @@ function renderSetupScreen() {
         </div>
       </div>
       <div class="card">
-        <h3>Body check-in</h3>
+        <h3>Body check-in <span class="mandatory-mark">*</span></h3>
         <p>Always required every day: a photo and your weight.</p>
       </div>
       <div class="card">
@@ -264,7 +280,7 @@ function renderSetupScreen() {
           <h3>Your daily steps</h3>
           <button type="button" class="secondary" id="add-step-btn">+ Add step</button>
         </div>
-        <div id="steps-editor"></div>
+        <div id="steps-editor" class="stack"></div>
       </div>
       <button type="submit">Start challenge</button>
     </form>
@@ -278,9 +294,9 @@ function stepEditorRow(step) {
         <label>Step name</label>
         <input type="text" class="step-name" value="${esc(step.name)}" placeholder="e.g. Read 10 pages" />
       </div>
-      <label class="checkbox-line"><input type="checkbox" class="step-mandatory" ${step.mandatory ? 'checked' : ''}/> Mandatory (required for a green day)</label>
-      <label class="checkbox-line"><input type="checkbox" class="step-photo" ${step.requiresPhoto ? 'checked' : ''}/> Requires a photo</label>
-      <label class="checkbox-line"><input type="checkbox" class="step-note" ${step.allowsNote ? 'checked' : ''}/> Allow a note</label>
+      <label class="toggle-row"><span>Mandatory (required for a green day)</span><input type="checkbox" class="step-mandatory toggle-input" ${step.mandatory ? 'checked' : ''}/></label>
+      <label class="toggle-row"><span>Requires a photo</span><input type="checkbox" class="step-photo toggle-input" ${step.requiresPhoto ? 'checked' : ''}/></label>
+      <label class="toggle-row"><span>Allow a note</span><input type="checkbox" class="step-note toggle-input" ${step.allowsNote ? 'checked' : ''}/></label>
       <button type="button" class="link remove-step-btn">Remove step</button>
     </div>
   `;
@@ -337,7 +353,7 @@ function attachSetupHandlers() {
 
 // ---------- Day / Today screen ----------
 
-function stepFieldHtml(step, entry, editable, date) {
+function stepFieldHtml(step, entry, editable) {
   const done = !!(entry && entry.done);
   const photoId = entry && entry.photoId;
   const note = (entry && entry.note) || '';
@@ -346,33 +362,83 @@ function stepFieldHtml(step, entry, editable, date) {
   html += `<input type="checkbox" class="step-done" data-step-id="${step.id}" ${done ? 'checked' : ''} ${editable ? '' : 'disabled'} />`;
   html += `<span>${esc(step.name)}${step.mandatory ? ' <span class="mandatory-mark">*</span>' : ''}</span>`;
   html += `</div>`;
+
+  const bodyParts = [];
   if (step.requiresPhoto) {
-    if (photoId) html += `<img class="thumb" data-photo-id="${photoId}" alt="${esc(step.name)} photo" />`;
+    let photoHtml = `<div class="photo-row">`;
+    photoHtml += photoId
+      ? `<img class="photo-thumb" data-photo-id="${photoId}" alt="${esc(step.name)} photo" />`
+      : `<div class="photo-placeholder"></div>`;
     if (editable) {
-      html += `<label class="file-btn secondary">${photoId ? 'Replace photo' : 'Take photo'}<input type="file" accept="image/*" capture="environment" class="step-photo-input visually-hidden-file" data-step-id="${step.id}" /></label>`;
+      photoHtml += `<label class="file-btn secondary">${photoId ? 'Replace photo' : 'Take photo'}<input type="file" accept="image/*" capture="environment" class="step-photo-input visually-hidden-file" data-step-id="${step.id}" /></label>`;
     } else if (!photoId) {
-      html += `<p class="readonly-note">No photo</p>`;
+      photoHtml += `<p class="readonly-note">No photo</p>`;
     }
+    photoHtml += `</div>`;
+    bodyParts.push(photoHtml);
   }
   if (step.allowsNote) {
     if (editable) {
-      html += `<textarea class="step-note-input" data-step-id="${step.id}" placeholder="Note (optional)">${esc(note)}</textarea>`;
+      bodyParts.push(`<textarea class="step-note-input" data-step-id="${step.id}" placeholder="Note (optional)">${esc(note)}</textarea>`);
     } else if (note) {
-      html += `<p class="readonly-note">${esc(note)}</p>`;
+      bodyParts.push(`<p class="readonly-note">${esc(note)}</p>`);
     }
   }
+  if (bodyParts.length) html += `<div class="step-body">${bodyParts.join('')}</div>`;
   html += `</div>`;
   return html;
 }
 
-function weekProgressHtml(date) {
-  if (!state.lastEvaluation || !state.activeAttempt) return '';
+function weekLineText(date) {
+  if (!state.lastEvaluation) return '';
   const eval_ = state.lastEvaluation;
   const week = eval_.weeks.find((w) => date >= w.startDate && date <= w.endDate) || eval_.weeks[eval_.weeks.length - 1];
   if (!week) return '';
   const greenCount = week.dayStatuses.filter((s) => s === 'green').length;
   const weekIndex = eval_.weeks.indexOf(week) + 1;
-  return `<p>Week ${weekIndex}: ${greenCount}/${state.config.weeklyTarget} green days</p>`;
+  return `Week ${weekIndex} &middot; ${greenCount}/${state.config.weeklyTarget} green days`;
+}
+
+function heroCardHtml(date, config, status, statusChanged, dayNumber) {
+  const pct = Math.max(0, Math.min(100, Math.round((dayNumber / config.totalDays) * 100)));
+  let html = `<div class="card hero-card">`;
+  html += `<div class="row baseline"><span class="day-number">${dayNumber}</span><span class="day-total">/ ${config.totalDays}</span></div>`;
+  html += `<div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>`;
+  html += `<div class="row space-between">`;
+  html += `<span class="week-line">${weekLineText(date)}</span>`;
+  html += `<span class="status-pill ${status}${statusChanged ? ' pop' : ''}">${status.toUpperCase()}</span>`;
+  html += `</div>`;
+  html += `</div>`;
+  return html;
+}
+
+function bodyCheckInCardHtml(day, editable) {
+  let html = `<div class="card">`;
+  html += `<h3><span class="mandatory-mark">*</span> Body check-in</h3>`;
+  html += `<div class="field"><label>Weight (kg)</label>`;
+  html += `<input type="number" step="0.1" id="weight-input" value="${day.weight ?? ''}" ${editable ? '' : 'disabled'} /></div>`;
+  html += `<div class="photo-row">`;
+  html += day.bodyPhotoId
+    ? `<img class="photo-thumb" data-photo-id="${day.bodyPhotoId}" alt="Body check-in photo" />`
+    : `<div class="photo-placeholder"></div>`;
+  if (editable) {
+    html += `<label class="file-btn secondary">${day.bodyPhotoId ? 'Replace photo' : 'Take photo'}<input type="file" accept="image/*" capture="environment" id="body-photo-input" class="visually-hidden-file" /></label>`;
+  } else if (!day.bodyPhotoId) {
+    html += `<p class="readonly-note">No photo</p>`;
+  }
+  html += `</div></div>`;
+  return html;
+}
+
+function renderCheckInSection(day, config, editable) {
+  let html = bodyCheckInCardHtml(day, editable);
+  html += `<div class="card"><h3>Steps</h3>`;
+  for (const step of config.steps) {
+    html += stepFieldHtml(step, day.steps[step.id], editable);
+  }
+  if (config.steps.length === 0) html += `<p>No custom steps yet. Add some in Settings.</p>`;
+  html += `</div>`;
+  return html;
 }
 
 function renderDayScreen(date, isTodayRoute) {
@@ -381,74 +447,57 @@ function renderDayScreen(date, isTodayRoute) {
   const today = todayStr();
 
   if (!attempt) {
-    return `<h1>${esc(config.name)}</h1><div class="banner info">No active attempt yet. Check Settings.</div>`;
+    return `<div class="screen-header"><h1>${esc(config.name)}</h1></div><div class="banner info">No active attempt yet. Check Settings.</div>`;
   }
 
   if (isTodayRoute && today < attempt.startDate) {
-    return `
-      <h1>${esc(config.name)}</h1>
-      <div class="banner info">Your challenge starts on ${attempt.startDate}. Come back then!</div>
-    `;
+    return `<div class="screen-header"><h1>${esc(config.name)}</h1></div><div class="banner info">Your challenge starts on ${attempt.startDate}. Come back then!</div>`;
   }
 
   if (isTodayRoute && attempt.status === 'complete') {
     return `
-      <h1>${esc(config.name)}</h1>
+      <div class="screen-header"><h1>${esc(config.name)}</h1></div>
       <div class="banner success">Challenge complete! You finished all ${config.totalDays} days.</div>
-      <p><a href="#/overview">View your overview</a></p>
+      <a href="#/overview">View your overview &rarr;</a>
     `;
   }
 
   const day = getOrInitDay(date);
   const outsideAttempt = isDateOutsideAttempt(date);
   const status = dayStatus(date, day, config, today);
-  const editable = isEditable(date, today) && date <= today;
+  const editable = !outsideAttempt && isEditable(date, today) && date <= today;
   const dayNumber = state.lastEvaluation ? state.lastEvaluation.currentDayNumber : null;
   const isFuture = date > today;
 
   const statusChanged = !outsideAttempt && lastKnownStatus[date] !== undefined && lastKnownStatus[date] !== status;
   lastKnownStatus[date] = status;
 
-  let html = '';
-  html += `<h1>${esc(config.name)}</h1>`;
   if (isTodayRoute) {
-    html += `<p class="day-headline">Day <span class="day-number">${dayNumber}</span> of ${config.totalDays}</p>`;
-    html += weekProgressHtml(date);
-  } else {
-    html += `<p>${date}${date === today ? ' (today)' : ''}</p>`;
-  }
-  html += `<div class="row space-between">`;
-  if (outsideAttempt) {
-    html += `<span class="status-pill outside">Not in challenge</span>`;
-  } else {
-    html += `<span class="status-pill ${status}${statusChanged ? ' pop' : ''}">${status.toUpperCase()}</span>`;
-  }
-  if (!editable && !isFuture) html += `<span class="readonly-note">Locked (read-only)</span>`;
-  html += `</div>`;
-
-  if (isFuture) {
-    html += `<div class="banner info">This day hasn't arrived yet.</div>`;
+    let html = `<div class="screen-header"><h1>${esc(config.name)}</h1></div>`;
+    html += heroCardHtml(date, config, status, statusChanged, dayNumber);
+    html += renderCheckInSection(day, config, editable);
     return html;
   }
 
+  let html = `<div class="back-row"><button type="button" class="secondary" id="back-btn">&lsaquo; Back</button></div>`;
+  html += `<div class="screen-header"><h1>${formatDateLong(date)}</h1></div>`;
   html += `<div class="card">`;
-  html += `<h3>Body check-in <span class="mandatory-mark">*</span></h3>`;
-  html += `<div class="field"><label>Weight (kg)</label>`;
-  html += `<input type="number" step="0.1" id="weight-input" value="${day.weight ?? ''}" ${editable ? '' : 'disabled'} /></div>`;
-  if (day.bodyPhotoId) html += `<img class="thumb" data-photo-id="${day.bodyPhotoId}" alt="Body check-in photo" />`;
-  if (editable) {
-    html += `<label class="file-btn secondary">${day.bodyPhotoId ? 'Replace photo' : 'Take photo'}<input type="file" accept="image/*" capture="environment" id="body-photo-input" class="visually-hidden-file" /></label>`;
-  } else if (!day.bodyPhotoId) {
-    html += `<p class="readonly-note">No photo</p>`;
+  html += `<div class="row space-between">`;
+  html += outsideAttempt
+    ? `<span class="status-pill outside">Not in challenge</span>`
+    : `<span class="status-pill ${status}${statusChanged ? ' pop' : ''}">${status.toUpperCase()}</span>`;
+  if (!outsideAttempt && !editable && !isFuture) html += `<span class="readonly-note">Locked</span>`;
+  html += `</div>`;
+  if (outsideAttempt) {
+    html += `<p class="muted-line">This date is outside your current challenge attempt.</p>`;
+  } else if (isFuture) {
+    html += `<p class="muted-line">This day hasn't arrived yet.</p>`;
   }
   html += `</div>`;
 
-  html += `<div class="card"><h3>Steps</h3>`;
-  for (const step of config.steps) {
-    html += stepFieldHtml(step, day.steps[step.id], editable, date);
+  if (!outsideAttempt && !isFuture) {
+    html += renderCheckInSection(day, config, editable);
   }
-  if (config.steps.length === 0) html += `<p>No custom steps yet. Add some in Settings.</p>`;
-  html += `</div>`;
 
   return html;
 }
@@ -477,6 +526,14 @@ async function handleStepPhotoChange(date, stepId, file) {
 }
 
 function attachDayHandlers(date) {
+  const backBtn = document.getElementById('back-btn');
+  if (backBtn) {
+    backBtn.addEventListener('click', () => {
+      if (history.length > 1) history.back();
+      else location.hash = '#/calendar';
+    });
+  }
+
   const weightInput = document.getElementById('weight-input');
   if (weightInput) {
     weightInput.addEventListener('change', async () => {
@@ -538,14 +595,17 @@ function renderCalendarScreen(monthParam) {
   const { y, m, daysInMonth, startWeekday } = monthMeta(calendarViewMonth);
   const config = state.config;
 
-  let html = `<h1>Calendar</h1>`;
-  html += `<div class="row space-between">
-    <button type="button" class="secondary" id="prev-month">&larr; Prev</button>
-    <h2>${y}-${String(m).padStart(2, '0')}</h2>
-    <button type="button" class="secondary" id="next-month">Next &rarr;</button>
+  let html = `<div class="screen-header"><h1>Calendar</h1></div>`;
+  html += `<div class="card">`;
+  html += `<div class="cal-header">
+    <button type="button" class="secondary round-icon-btn" id="prev-month" aria-label="Previous month">&lsaquo;</button>
+    <div class="cal-month-title">${formatMonthLong(y, m)}</div>
+    <button type="button" class="secondary round-icon-btn" id="next-month" aria-label="Next month">&rsaquo;</button>
   </div>`;
-  html += `<div class="calendar-grid">`;
+  html += `<div class="cal-weekdays">`;
   ['S', 'M', 'T', 'W', 'T', 'F', 'S'].forEach((w) => (html += `<div class="weekday-label">${w}</div>`));
+  html += `</div>`;
+  html += `<div class="calendar-grid">`;
   for (let i = 0; i < startWeekday; i++) html += `<div class="calendar-cell empty"></div>`;
   for (let d = 1; d <= daysInMonth; d++) {
     const date = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -555,7 +615,8 @@ function renderCalendarScreen(monthParam) {
     html += `<button type="button" class="calendar-cell ${status} ${isToday}" data-date="${date}">${d}</button>`;
   }
   html += `</div>`;
-  html += `<p style="margin-top:12px"><a href="#/overview">Zoom out: full challenge overview &rarr;</a></p>`;
+  html += `</div>`;
+  html += `<button type="button" class="secondary full-width" id="view-overview-btn">View full challenge</button>`;
   return html;
 }
 
@@ -574,6 +635,9 @@ function attachCalendarHandlers() {
     el.addEventListener('click', () => {
       location.hash = `#/day/${el.dataset.date}`;
     });
+  });
+  document.getElementById('view-overview-btn').addEventListener('click', () => {
+    location.hash = '#/overview';
   });
 }
 
@@ -602,12 +666,24 @@ function buildFullOverview() {
   return weeks;
 }
 
+const WEEK_BADGE_TEXT = { green: 'Pass', red: 'Fail', pending: '–' };
+
 function renderOverviewScreen() {
   const config = state.config;
   const attempt = state.activeAttempt;
-  if (!attempt) return `<h1>Overview</h1><p>No active attempt.</p>`;
+  if (!attempt) {
+    return `<div class="screen-header"><h1>Overview</h1></div><p>No active attempt.</p>`;
+  }
   const weeks = buildFullOverview();
-  let html = `<h1>Challenge overview</h1><p>${esc(config.name)} — started ${attempt.startDate}</p>`;
+  let html = `<div class="screen-header"><h1>Challenge overview</h1><p class="screen-subtitle">${esc(config.name)} — started ${attempt.startDate}</p></div>`;
+  html += `<div class="card">`;
+  html += `<div class="legend-row">
+    <span class="legend-item"><span class="legend-dot green"></span>Green</span>
+    <span class="legend-item"><span class="legend-dot red"></span>Red</span>
+    <span class="legend-item"><span class="legend-dot pending"></span>Pending</span>
+    <span class="legend-item"><span class="legend-dot upcoming"></span>Upcoming</span>
+  </div>`;
+  html += `<div class="overview-weeks">`;
   weeks.forEach((week, idx) => {
     html += `<div class="overview-week">`;
     html += `<div class="week-label">W${idx + 1}</div>`;
@@ -616,9 +692,11 @@ function renderOverviewScreen() {
       html += `<button type="button" class="overview-day ${status}" data-date="${date}" title="${date}"></button>`;
     });
     for (let pad = week.dates.length; pad < 7; pad++) html += `<div class="overview-day empty"></div>`;
-    html += `<div class="week-badge ${week.status}">${week.status === 'pending' ? '...' : week.status.toUpperCase()}</div>`;
+    html += `<div class="week-badge ${week.status}">${WEEK_BADGE_TEXT[week.status] || week.status}</div>`;
     html += `</div>`;
   });
+  html += `</div>`;
+  html += `</div>`;
   return html;
 }
 
@@ -648,24 +726,29 @@ function lastExportInfo() {
 function renderSettingsScreen() {
   const config = state.config;
   const exportInfo = lastExportInfo();
-  let html = `<h1>Settings</h1>`;
+  let html = `<div class="screen-header"><h1>Settings</h1></div>`;
 
-  html += `<div class="banner info">Add this app to your Home Screen for reliable offline storage (Share &rarr; Add to Home Screen on iOS, or the browser menu on Android).</div>`;
-  html += `<div class="banner ${exportInfo.warn ? 'info' : 'success'}">${exportInfo.text}</div>`;
+  html += `<div class="card info-card">
+    <p>Add this app to your Home Screen for reliable offline storage (Share &rarr; Add to Home Screen on iOS, or the browser menu on Android).</p>
+    <p>${exportInfo.text}</p>
+  </div>`;
 
-  html += `<div class="card"><h3>Backup</h3>
-    <button type="button" id="export-btn">Export backup</button>
-    <p class="hint">Saves everything (including photos) to one JSON file.</p>
-    <button type="button" class="secondary" id="import-btn">Import backup</button>
+  html += `<div class="card">
+    <h3>Backup</h3>
+    <div class="two-col">
+      <button type="button" id="export-btn">Export backup</button>
+      <button type="button" class="secondary" id="import-btn">Import backup</button>
+    </div>
     <input type="file" id="import-input" accept=".json,application/json" style="display:none" />
-    <p class="hint">Replaces ALL data on this device.</p>
+    <p class="hint">Saves everything, including photos, to one JSON file. Import replaces ALL data on this device.</p>
   </div>`;
 
   html += `<div class="card"><h3>Storage</h3><p id="persist-status">Checking...</p></div>`;
 
   html += `<div class="card"><h3>Attempt history</h3>${state.attempts.slice().reverse().map(attemptRowHtml).join('') || '<p>No attempts yet.</p>'}</div>`;
 
-  html += `<form id="settings-form"><div class="card">
+  html += `<form id="settings-form" class="stack">
+  <div class="card">
     <h3>Challenge</h3>
     <div class="field"><label>Name</label><input type="text" id="set-name" value="${esc(config.name)}" /></div>
     <div class="field"><label>Number of days</label><input type="number" id="set-days" min="1" value="${config.totalDays}" /></div>
@@ -674,7 +757,7 @@ function renderSettingsScreen() {
   </div>
   <div class="card">
     <div class="row space-between"><h3>Steps</h3><button type="button" class="secondary" id="add-step-btn-settings">+ Add step</button></div>
-    <div id="settings-steps-editor"></div>
+    <div id="settings-steps-editor" class="stack"></div>
   </div>
   <button type="submit">Save settings</button>
   </form>`;
