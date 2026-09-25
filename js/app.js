@@ -137,6 +137,16 @@ async function saveDay(day) {
   await reevaluate();
 }
 
+// True when date falls before the active attempt's start, or after its
+// last day — i.e. it isn't part of the current challenge attempt at all,
+// so it should never be shown as green/red/pending.
+function isDateOutsideAttempt(date) {
+  const attempt = state.activeAttempt;
+  if (!attempt || !state.config) return true;
+  const lastDay = addDays(attempt.startDate, state.config.totalDays - 1);
+  return date < attempt.startDate || date > lastDay;
+}
+
 // ---------- router ----------
 
 function parseHash() {
@@ -390,12 +400,13 @@ function renderDayScreen(date, isTodayRoute) {
   }
 
   const day = getOrInitDay(date);
+  const outsideAttempt = isDateOutsideAttempt(date);
   const status = dayStatus(date, day, config, today);
   const editable = isEditable(date, today) && date <= today;
   const dayNumber = state.lastEvaluation ? state.lastEvaluation.currentDayNumber : null;
   const isFuture = date > today;
 
-  const statusChanged = lastKnownStatus[date] !== undefined && lastKnownStatus[date] !== status;
+  const statusChanged = !outsideAttempt && lastKnownStatus[date] !== undefined && lastKnownStatus[date] !== status;
   lastKnownStatus[date] = status;
 
   let html = '';
@@ -406,7 +417,12 @@ function renderDayScreen(date, isTodayRoute) {
   } else {
     html += `<p>${date}${date === today ? ' (today)' : ''}</p>`;
   }
-  html += `<div class="row space-between"><span class="status-pill ${status}${statusChanged ? ' pop' : ''}">${status.toUpperCase()}</span>`;
+  html += `<div class="row space-between">`;
+  if (outsideAttempt) {
+    html += `<span class="status-pill outside">Not in challenge</span>`;
+  } else {
+    html += `<span class="status-pill ${status}${statusChanged ? ' pop' : ''}">${status.toUpperCase()}</span>`;
+  }
   if (!editable && !isFuture) html += `<span class="readonly-note">Locked (read-only)</span>`;
   html += `</div>`;
 
@@ -534,7 +550,7 @@ function renderCalendarScreen(monthParam) {
   for (let d = 1; d <= daysInMonth; d++) {
     const date = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     const day = state.days[date];
-    const status = dayStatus(date, day, config, today);
+    const status = isDateOutsideAttempt(date) ? 'outside' : dayStatus(date, day, config, today);
     const isToday = date === today ? 'today' : '';
     html += `<button type="button" class="calendar-cell ${status} ${isToday}" data-date="${date}">${d}</button>`;
   }
@@ -599,7 +615,7 @@ function renderOverviewScreen() {
       const status = dayStatus(date, state.days[date], config, todayStr());
       html += `<button type="button" class="overview-day ${status}" data-date="${date}" title="${date}"></button>`;
     });
-    for (let pad = week.dates.length; pad < 7; pad++) html += `<div></div>`;
+    for (let pad = week.dates.length; pad < 7; pad++) html += `<div class="overview-day empty"></div>`;
     html += `<div class="week-badge ${week.status}">${week.status === 'pending' ? '...' : week.status.toUpperCase()}</div>`;
     html += `</div>`;
   });
