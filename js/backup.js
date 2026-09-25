@@ -1,7 +1,8 @@
 // Export/import the whole database as a single JSON backup file.
 // Photos are embedded as base64 data URLs so the backup is one portable file.
 
-import { getAll, clearAll, put } from './db.js';
+import { getAll, clearAll, putMany } from './db.js';
+import { migrateV1, dayKey } from './migrate.js';
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -13,15 +14,7 @@ function blobToBase64(blob) {
 }
 
 const PHOTO_DATA_URL_RE = /^data:image\/[a-z+.-]+;base64,/;
-const DATE_STR_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-function hasStringId(record) {
-  return !!record && typeof record.id === 'string' && record.id.length > 0;
-}
-
-function hasDateKey(day) {
-  return !!day && typeof day.date === 'string' && DATE_STR_RE.test(day.date);
-}
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Decodes a data: URL to a Blob by hand (atob), never via fetch() — fetch()
 // treats a malformed/non-data-URL string as a relative URL and will
@@ -54,8 +47,8 @@ function downloadFile(text, filename) {
 }
 
 export async function buildBackupJson() {
-  const [config, attempts, days, photos] = await Promise.all([
-    getAll('config'),
+  const [challenges, attempts, days, photos] = await Promise.all([
+    getAll('challenges'),
     getAll('attempts'),
     getAll('days'),
     getAll('photos'),
@@ -64,9 +57,9 @@ export async function buildBackupJson() {
     photos.map(async (p) => ({ id: p.id, createdAt: p.createdAt, data: await blobToBase64(p.blob) })),
   );
   const backup = {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
-    config,
+    challenges,
     attempts,
     days,
     photos: photosEncoded,
@@ -94,35 +87,53 @@ export async function exportBackup() {
   return { method: 'download' };
 }
 
+// Upgrades a v1-shaped backup (or passes through a v2 one) to the v2 shape
+// using the same pure migration the IndexedDB in-upgrade path uses.
+function toV2(backup) {
+  if (backup.version === 2) return backup;
+  if (Array.isArray(backup.config) || backup.version === 1) {
+    const v1config = Array.isArray(backup.config) ? backup.config[0] : undefined;
+    const out = migrateV1({ config: v1config, attempts: backup.attempts || [], days: backup.days || [] });
+    return { version: 2, ...out, photos: backup.photos || [] };
+  }
+  throw new Error('Invalid backup file');
+}
+
+function validateV2(b) {
+  const bad = () => { throw new Error('Invalid backup file'); };
+  if (!Array.isArray(b.challenges) || !Array.isArray(b.attempts) || !Array.isArray(b.days) || !Array.isArray(b.photos)) bad();
+  const ids = new Set();
+  for (const c of b.challenges) {
+    if (typeof c.id !== 'string' || !Array.isArray(c.steps)) bad();
+    ids.add(c.id);
+  }
+  for (const a of b.attempts) if (typeof a.id !== 'string' || !ids.has(a.challengeId) || !DATE_RE.test(a.startDate)) bad();
+  for (const d of b.days) if (!DATE_RE.test(d.date) || !ids.has(d.challengeId) || d.key !== dayKey(d.challengeId, d.date)) bad();
+}
+
 // Replaces ALL data in the database with the contents of the backup.
 // Caller is responsible for confirming with the user first.
 // Everything is validated and decoded BEFORE any existing data is cleared,
 // so a corrupt/partial file fails loudly without wiping the user's data.
 export async function importBackup(jsonText) {
-  const backup = JSON.parse(jsonText);
-  if (!backup || typeof backup !== 'object' || !Array.isArray(backup.days)) {
-    throw new Error('Invalid backup file');
-  }
-  const config = Array.isArray(backup.config) ? backup.config : [];
-  const attempts = Array.isArray(backup.attempts) ? backup.attempts : [];
-  const days = backup.days;
-  const photos = Array.isArray(backup.photos) ? backup.photos : [];
+  const parsed = JSON.parse(jsonText);
+  if (!parsed || typeof parsed !== 'object') throw new Error('Invalid backup file');
 
-  if (!config.every(hasStringId)) throw new Error('Invalid backup file');
-  if (!attempts.every(hasStringId)) throw new Error('Invalid backup file');
-  if (!days.every(hasDateKey)) throw new Error('Invalid backup file');
-  if (!photos.every(hasStringId)) throw new Error('Invalid backup file');
+  const backup = toV2(parsed);
+  validateV2(backup);
 
-  const photoRecords = photos.map((p) => ({
+  const photoRecords = backup.photos.map((p) => ({
     id: p.id,
     blob: decodePhotoDataUrl(p.data),
     createdAt: p.createdAt,
   }));
 
   await clearAll();
-  for (const c of config) await put('config', c);
-  for (const a of attempts) await put('attempts', a);
-  for (const d of days) await put('days', d);
-  for (const p of photoRecords) await put('photos', p);
+  await putMany([
+    ...backup.challenges.map((value) => ({ store: 'challenges', value })),
+    ...backup.attempts.map((value) => ({ store: 'attempts', value })),
+    ...backup.days.map((value) => ({ store: 'days', value })),
+    ...photoRecords.map((value) => ({ store: 'photos', value })),
+  ]);
   return backup;
 }
