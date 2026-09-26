@@ -162,3 +162,19 @@ body { padding: env(safe-area-inset-top) 0 calc(96px + env(safe-area-inset-botto
 .summary-item-value { font-size: 12px; color: rgba(255,255,255,.6); margin-top: 2px; overflow-wrap: anywhere; }
 .summary-item-note { font-size: 12px; color: rgba(255,255,255,.6); margin-top: 2px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .summary-photo-tag { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 2px 6px; border-radius: 6px; }
+
+/* Stats screen (Task 9) */
+.ring-group { padding: 20px; }
+.trend-group { padding: 16px; }
+.ring { width: 100%; max-width: 240px; display: block; margin: 0 auto; }
+.ring-value { fill: var(--text); font: 700 44px var(--font); letter-spacing: -0.02em; }
+.ring-caption { fill: var(--text2); font: 500 13px var(--font); }
+.ring-legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 16px; text-align: center; }
+.ring-legend-value { font: 700 17px var(--font); color: var(--text); overflow-wrap: anywhere; }
+.ring-legend-value.accent { color: var(--accent); }
+.ring-legend-value.green { color: var(--green); }
+.ring-legend-label { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.trend { width: 100%; height: auto; display: block; }
+.axis text { fill: var(--text2); font: 11px var(--font); }
+.axis line { stroke: rgba(255,255,255,.08); }
+.axis-x .domain { stroke: rgba(255,255,255,.15); }

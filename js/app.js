@@ -15,6 +15,7 @@ import { renderToday, renderDay } from './ui/today.js';
 import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 import { renderSummary } from './ui/summary.js';
+import { renderStats } from './ui/stats.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -37,7 +38,7 @@ const ROUTES = {
   day: (root, params) => renderDay(root, params.date),
   calendar: (root, params) => renderCalendar(root, params.month),
   overview: renderOverview,
-  stats: placeholder('Stats'),
+  stats: renderStats,
   challenges: renderChallenges,
   'challenges/new': (root) => renderChallengeForm(root, 'new'),
   'challenges/:id': (root, params) => renderChallengeForm(root, params.id),
