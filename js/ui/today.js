@@ -59,6 +59,14 @@ let navigatedInApp = false;
 // second history.back()/hash change on top of the first.
 let navigating = false;
 window.addEventListener('hashchange', () => { navigatedInApp = true; navigating = false; focusRecord = null; });
+// Round-3 fix: history.back() doesn't always produce a hashchange (e.g. it
+// can land on an entry whose hash happens to match the current one), which
+// would leave `navigating` stuck true and Done/"‹ Back" permanently inert
+// for the rest of the page's life. `pageshow` fires whenever the page
+// becomes the active one again — including via back/forward navigation —
+// so it's a reliable second place to clear it. Registered once at module
+// load; renderScreen also clears it as a third belt-and-braces reset.
+window.addEventListener('pageshow', () => { navigating = false; });
 
 // Per-step save error, keyed the same way as expandedKey
 // (`${challengeId}:${date}:${stepId}`), shown as an inline red footer under
@@ -332,6 +340,39 @@ function forgetFocusIfLeft() {
   }, 0);
 }
 
+// Companion to restoreFocus's `data-restored` marker: fires on every blur of
+// one of our fields (both a natural tab-away/click-elsewhere and a forced
+// blur — see wireDelegation's Done/"‹ Back" handling). A restored field
+// whose value still differs from what's actually stored never got a native
+// `change` (browsers only fire it after a *user* edit, and restoreFocus set
+// .value programmatically), so without this the edit is silently lost the
+// moment the field blurs with nothing typed into it since the restore.
+// Dispatching `change` ourselves — only when the value genuinely still
+// differs from the store — routes it through the existing save path
+// (fieldContext-based, so it's correct even after this field's row has
+// changed shape) without ever double-saving an edit the user made after the
+// restore, which already triggers its own native `change` on blur.
+function saveRestoredFieldIfNeeded(e) {
+  const field = e.target;
+  if (!field.dataset || field.dataset.restored !== '1') return;
+  delete field.dataset.restored;
+  const role = ROLE_MAP[field.dataset.role];
+  if (!role) return;
+  const ctx = fieldContext(field);
+  if (!ctx) return;
+  const day = store.getDay(ctx.challengeId, ctx.date);
+  const entry = (day.steps && day.steps[field.dataset.stepId]) || {};
+  let stillUnsaved;
+  if (role === 'number') {
+    const raw = field.value;
+    const parsed = raw.trim() === '' ? undefined : parseNumberInput(raw);
+    stillUnsaved = parsed !== (entry.value ?? undefined);
+  } else {
+    stillUnsaved = field.value !== (entry.note || '');
+  }
+  if (stillUnsaved) field.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 // Called after every (re-)render: if the user was mid-typing in a field on
 // this same challenge/date, put the field back the way they left it —
 // value (even invalid text, re-flagged), caret position, and focus itself —
@@ -350,6 +391,14 @@ function restoreFocus(root, challengeId, date) {
       const parsed = parseNumberInput(focusRecord.value);
       el.classList.toggle('invalid', trimmed !== '' && parsed === undefined);
     }
+    // The DOM now shows an edit the store doesn't have yet. Browsers only
+    // fire `change` on blur after a *user* edit to the element — setting
+    // .value programmatically (as just above) doesn't count — so if nothing
+    // is typed into this field again before it loses focus, no `change`
+    // would ever fire and this edit would quietly vanish. The delegated
+    // focusout listener below dispatches one itself for any field still
+    // marked restored when it blurs.
+    el.dataset.restored = '1';
   }
   if (focusRecord.selectionStart != null && typeof el.setSelectionRange === 'function') {
     try {
@@ -442,6 +491,7 @@ function wireDelegation(root) {
   root.addEventListener('focusin', rememberFocus);
   root.addEventListener('input', trackFocusValue);
   root.addEventListener('focusout', forgetFocusIfLeft);
+  root.addEventListener('focusout', saveRestoredFieldIfNeeded);
 
   // Round-2 fix: pointerdown-based navigation (round 1) had three problems —
   // on touch it fires at touchstart, so the re-render it triggers can rip a
@@ -465,6 +515,10 @@ function wireDelegation(root) {
     if (e.target.closest('[data-role="back"], [data-role="done"]')) e.preventDefault();
   });
 
+  // Blurring here is what makes a pending edit save before navigating away —
+  // its own `change` (native, if the user typed something; the synthetic
+  // one from saveRestoredFieldIfNeeded above otherwise) fires as part of
+  // this call, synchronously, while the field is still attached.
   const blurActiveField = () => {
     const active = document.activeElement;
     if (active && root.contains(active) && active.matches('input, textarea')) active.blur();
@@ -621,6 +675,11 @@ function wireDelegation(root) {
 // ---------- main render ----------
 
 async function renderScreen(root, { date, dayRoute }) {
+  // Belt-and-braces alongside the hashchange reset: any render at all means
+  // the app is live and responsive again, so a `navigating` guard left over
+  // from a Done/"‹ Back" tap that didn't happen to change the hash (e.g.
+  // history.back() landing on an entry with the same hash) can't get stuck.
+  navigating = false;
   const challenge = store.selected();
   if (!challenge) {
     root.innerHTML = '';
