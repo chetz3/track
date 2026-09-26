@@ -12,6 +12,7 @@
 import * as store from './store.js';
 import { esc, revokePhotosIn } from './ui/dom.js';
 import { renderToday, renderDay } from './ui/today.js';
+import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 
 const appEl = document.getElementById('app');
@@ -33,8 +34,8 @@ function placeholder(title) {
 const ROUTES = {
   today: renderToday,
   day: (root, params) => renderDay(root, params.date),
-  calendar: placeholder('Calendar'),
-  overview: placeholder('Overview'),
+  calendar: (root, params) => renderCalendar(root, params.month),
+  overview: renderOverview,
   stats: placeholder('Stats'),
   challenges: renderChallenges,
   'challenges/new': (root) => renderChallengeForm(root, 'new'),
