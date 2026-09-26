@@ -160,13 +160,17 @@ function isOutsideDisplayAttempt(challengeId, challenge, date) {
 
 export async function updateStep(challengeId, date, stepId, patch) {
   const challenge = state.challenges.find((c) => c.id === challengeId);
-  if (!challenge) return;
-  if (!isEditable(date, today())) return;
-  if (isOutsideDisplayAttempt(challengeId, challenge, date)) return;
+  if (!challenge) throw new Error('This day can no longer be edited.');
+  if (!isEditable(date, today())) throw new Error('This day can no longer be edited.');
+  if (isOutsideDisplayAttempt(challengeId, challenge, date)) throw new Error('This day can no longer be edited.');
 
-  const day = getDay(challengeId, date);
+  const oldDay = getDay(challengeId, date);
+  // Build the new day as a copy — never mutate oldDay/oldDay.steps in place —
+  // so that if db.put below fails, the in-memory state (assigned only after
+  // a successful write) still reflects what's actually on disk instead of a
+  // value the UI displayed as saved but that never made it to the DB.
+  const day = { ...oldDay, steps: { ...(oldDay.steps || {}) } };
   if (day.mandatoryStepIds == null) day.mandatoryStepIds = mandatorySnapshot(challenge);
-  day.steps = day.steps || {};
 
   const stepDef = challenge.steps.find((s) => s.id === stepId);
   const oldEntry = day.steps[stepId];
@@ -198,7 +202,7 @@ export async function createChallenge(input) {
   // the shape migrate.js produces: challenges never carry a startDate,
   // since it would go stale across resets).
   const { startDate, ...challengeFields } = input;
-  const challenge = { ...challengeFields, id };
+  const challenge = { ...challengeFields, id, createdAt: Date.now() };
   const attempt = { id, challengeId: id, startDate, status: 'active', greenWeeks: 0 };
 
   await db.putMany([
@@ -219,10 +223,16 @@ export async function updateChallenge(challenge) {
   const errors = validateChallengeInput({ ...challenge, startDate: undefined }, today());
   if (errors.length) throw new Error(errors.join(' '));
 
-  await db.put('challenges', challenge);
+  // The edit form only ever carries name/totalDays/weeklyTarget/steps — never
+  // createdAt — so writing `challenge` as-is would silently drop it from the
+  // stored record. Preserve whatever the existing record has.
+  const existing = state.challenges.find((c) => c.id === challenge.id);
+  const toStore = { ...challenge, createdAt: (existing && existing.createdAt) ?? challenge.createdAt };
+
+  await db.put('challenges', toStore);
 
   const days = state.days[challenge.id] || {};
-  const resnapshotted = resnapshotToday(days[today()], challenge);
+  const resnapshotted = resnapshotToday(days[today()], toStore);
   if (resnapshotted) await db.put('days', resnapshotted);
 
   await loadAll();

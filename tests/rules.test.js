@@ -63,6 +63,10 @@ test('parseNumberInput accepts dot and comma decimals, rejects junk', () => {
   assert.equal(parseNumberInput(''), undefined);
   assert.equal(parseNumberInput('abc'), undefined);
   assert.equal(parseNumberInput('1e999'), undefined);
+  assert.equal(parseNumberInput('10,000'), undefined, 'ambiguous thousands separator is rejected, not silently treated as 10');
+  assert.equal(parseNumberInput('0x10'), undefined, 'hex is rejected');
+  assert.equal(parseNumberInput('-2.5'), -2.5);
+  assert.equal(parseNumberInput('.5'), 0.5, 'leading-decimal form is accepted');
 });
 
 test('isNumberValue only accepts finite numbers', () => {

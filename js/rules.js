@@ -37,10 +37,22 @@ export function isNumberValue(v) {
   return typeof v === 'number' && Number.isFinite(v);
 }
 
+// Matches a plain decimal: optional leading '-', digits (or none before a
+// leading '.'), and an optional '.'/',' followed by digits — e.g. '78.4',
+// '-2.5', '.5'. Deliberately excludes hex ('0x10') and exponent ('1e999')
+// forms that `Number(...)` would otherwise happily parse.
+const PLAIN_DECIMAL_RE = /^-?(\d+([.,]\d+)?|\.\d+)$/;
+// A comma followed by exactly three digits and nothing else is ambiguous
+// (European decimal '12,345' meaning 12.345 vs. a thousands separator
+// meaning 12345) — reject rather than guess.
+const THOUSANDS_RE = /^-?\d{1,3}(,\d{3})+$/;
+
 export function parseNumberInput(str) {
-  const t = String(str ?? '').trim().replace(',', '.');
+  const t = String(str ?? '').trim();
   if (t === '') return undefined;
-  const n = Number(t);
+  if (THOUSANDS_RE.test(t)) return undefined;
+  if (!PLAIN_DECIMAL_RE.test(t)) return undefined;
+  const n = Number(t.replace(',', '.'));
   return Number.isFinite(n) ? n : undefined;
 }
 

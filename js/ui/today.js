@@ -7,7 +7,7 @@
 
 import * as store from '../store.js';
 import { dayStatus, isEditable, isStepComplete, parseNumberInput, addDays, diffDays } from '../rules.js';
-import { savePhoto, photoDateOf } from '../photos.js';
+import { savePhoto, photoDateOf, deletePhoto } from '../photos.js';
 import { esc, formatDateLong, formatDateShort, hydratePhotos, readFileAsPhoto } from './dom.js';
 import { openCamera } from './camera.js';
 
@@ -439,7 +439,16 @@ async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
     savingByKey.set(key, true);
     rerenderIfCurrent(ctx); // show "Saving…" right away, before the (possibly slow) resize/write below
     const photoId = await savePhoto(file);
-    await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
+    try {
+      await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
+    } catch (err) {
+      // The photo blob was written but the day it was meant for couldn't be
+      // saved (e.g. it stopped being editable while the resize/write was in
+      // flight) — without this it would sit in the `photos` store forever,
+      // never referenced by any day.
+      await deletePhoto(photoId).catch(() => {});
+      throw err;
+    }
     // Cleared before markSaved's (or store.updateStep's own, deferred)
     // re-render runs, so it never renders a still-"Saving…" row on top of
     // the now-saved photo.
