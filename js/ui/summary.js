@@ -15,6 +15,57 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const STATUS_LABELS = { green: 'Complete', red: 'Missed', pending: 'In progress', future: 'Upcoming', outside: 'Outside attempt' };
 
+// ---------- in-app navigation tracking (for the close button's fallback) ----------
+
+// Any hash our router recognises (see app.js's matchRoute) — in practice
+// every hash, since its `default:` case treats an unknown one as `today`.
+// So `arrivedFromInApp` really means "at least one hashchange has fired
+// since this module loaded" — i.e. the summary viewer was reached via
+// in-app navigation, and `history.back()` is safe. It stays false only
+// when the summary route was the very first thing this tab loaded (a
+// deep link/bookmark straight onto #/summary/:date), where back() could
+// leave the app entirely.
+const KNOWN_TOPS = ['', 'today', 'day', 'calendar', 'overview', 'stats', 'challenges', 'summary'];
+function isInAppHash(hash) {
+  const top = hash.replace(/^#\/?/, '').split('/')[0];
+  return KNOWN_TOPS.includes(top);
+}
+
+let previousHash = location.hash;
+let arrivedFromInApp = false;
+
+// Registered once at module load (not per-render): also the single place
+// that detaches the Escape handler, so navigating away (a real hashchange,
+// as opposed to a store-driven re-render of the same route) always leaves
+// at most one keydown listener attached.
+window.addEventListener('hashchange', () => {
+  if (isInAppHash(previousHash)) arrivedFromInApp = true;
+  previousHash = location.hash;
+  detachEscHandler();
+});
+
+// ---------- Escape-to-close ----------
+
+let currentEscHandler = null;
+
+function detachEscHandler() {
+  if (currentEscHandler) {
+    document.removeEventListener('keydown', currentEscHandler);
+    currentEscHandler = null;
+  }
+}
+
+function attachEscHandler() {
+  detachEscHandler();
+  currentEscHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeViewer();
+    }
+  };
+  document.addEventListener('keydown', currentEscHandler);
+}
+
 function computeStatus(challenge, date, day, todayStr) {
   const attempt = store.displayAttempt(challenge.id);
   if (!attempt) return 'outside';
@@ -79,7 +130,7 @@ function controlsHtml(showEdit) {
 // ---------- behaviour ----------
 
 function closeViewer() {
-  if (window.history.length > 1) {
+  if (arrivedFromInApp) {
     history.back();
   } else {
     location.hash = '#/calendar';
@@ -92,7 +143,8 @@ function wireStrip(root, photoCount) {
   const dotsWrap = root.querySelector('[data-role="dots"]');
   if (!strip || !dotsWrap) return;
   strip.addEventListener('scroll', () => {
-    const idx = Math.round(strip.scrollLeft / (strip.clientWidth || 1));
+    const raw = Math.round(strip.scrollLeft / (strip.clientWidth || 1));
+    const idx = Math.min(photoCount - 1, Math.max(0, raw));
     dotsWrap.querySelectorAll('.summary-dot').forEach((d, i) => d.classList.toggle('active', i === idx));
   }, { passive: true });
 }
@@ -116,7 +168,12 @@ function wireControls(root, date) {
 export async function renderSummary(root, dateParam) {
   const challenge = store.selected();
   if (!challenge) {
-    root.innerHTML = '';
+    // No selected challenge (e.g. transiently null mid-delete): still show
+    // the close button rather than stranding the user on a blank,
+    // tab-bar-less screen.
+    root.innerHTML = `<div class="summary-viewer">${controlsHtml(false)}</div>`;
+    wireControls(root.querySelector('.summary-viewer'), null);
+    attachEscHandler();
     return;
   }
 
@@ -136,5 +193,6 @@ export async function renderSummary(root, dateParam) {
   const viewer = root.querySelector('.summary-viewer');
   wireStrip(viewer, summary.photos.length);
   wireControls(viewer, date);
+  attachEscHandler();
   await hydratePhotos(root);
 }

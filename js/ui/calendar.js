@@ -4,7 +4,7 @@
 // container already attached inside #app. They may only write inside it.
 
 import * as store from '../store.js';
-import { dayStatus, addDays } from '../rules.js';
+import { dayStatus, addDays, weekStatus } from '../rules.js';
 import { esc, formatMonthLong, formatDateShort } from './dom.js';
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -57,7 +57,7 @@ function wireCalendarDelegation(root) {
       return;
     }
     if (e.target.closest('[data-role="view-challenge"]')) {
-      location.hash = `#/challenges/${root.__calendarChallengeId}`;
+      location.hash = '#/overview';
     }
   });
 }
@@ -87,7 +87,6 @@ export async function renderCalendar(root, yyyyMm) {
     cellsHtml.push(calendarCellHtml(date, status, date === todayStr));
   }
 
-  root.__calendarChallengeId = challenge.id;
   root.innerHTML = `
     <h1 class="large-title">Calendar</h1>
     <p class="subtitle">${esc(challenge.name)}</p>
@@ -135,6 +134,33 @@ function wireOverviewDelegation(root) {
   });
 }
 
+// Every week of the attempt's full window, startDate through totalDays —
+// unlike store.state.evaluations[id].weeks (evaluateAttempt), which stops at
+// the first pending/red week so later weeks never show. Mirrors the v1
+// app's buildFullOverview (git show main:js/app.js).
+function buildFullOverview(challenge, attempt, todayStr) {
+  const frozenWeeks = attempt.greenWeeks || 0;
+  const lastDate = addDays(attempt.startDate, challenge.totalDays - 1);
+  const weeks = [];
+  let dayNumber = 1;
+  let weekIndex = 0;
+  while (dayNumber <= challenge.totalDays) {
+    const dates = [];
+    const statuses = [];
+    for (let i = 0; i < 7 && dayNumber <= challenge.totalDays; i++, dayNumber++) {
+      const date = addDays(attempt.startDate, dayNumber - 1);
+      const outside = date < attempt.startDate || date > lastDate;
+      const status = outside ? 'outside' : dayStatus(date, store.getDay(challenge.id, date), challenge, todayStr);
+      dates.push(date);
+      statuses.push(status);
+    }
+    const status = weekIndex < frozenWeeks ? 'green' : weekStatus(statuses, challenge.weeklyTarget);
+    weeks.push({ dates, statuses, status });
+    weekIndex++;
+  }
+  return weeks;
+}
+
 export async function renderOverview(root) {
   const challenge = store.selected();
   if (!challenge) {
@@ -142,9 +168,9 @@ export async function renderOverview(root) {
     return;
   }
 
-  const evaluation = store.state.evaluations[challenge.id];
+  const attempt = store.displayAttempt(challenge.id);
 
-  if (!evaluation || !evaluation.weeks.length) {
+  if (!attempt) {
     root.innerHTML = `
       <h1 class="large-title">Overview</h1>
       <p class="subtitle">${esc(challenge.name)}</p>
@@ -154,15 +180,20 @@ export async function renderOverview(root) {
     return;
   }
 
-  const weeksHtml = evaluation.weeks.map((week, i) => {
+  const todayStr = store.today();
+  const weeks = buildFullOverview(challenge, attempt, todayStr);
+
+  const weeksHtml = weeks.map((week, i) => {
     const [cls, label] = badgeFor(week.status);
-    const daysHtml = week.dayStatuses.map((status, di) => {
-      const date = addDays(week.startDate, di);
+    const daysHtml = week.dates.map((date, di) => {
+      const status = week.statuses[di];
       return `<button type="button" class="ov-day ${status}" data-role="ov-day" data-date="${esc(date)}" data-status="${esc(status)}" aria-label="${esc(formatDateShort(date))}"></button>`;
     }).join('');
+    let padHtml = '';
+    for (let p = week.dates.length; p < 7; p++) padHtml += `<div class="ov-day empty" aria-hidden="true"></div>`;
     return `<div class="ov-week">
       <span class="ov-week-label">W${i + 1}</span>
-      ${daysHtml}
+      ${daysHtml}${padHtml}
       <span class="pill ov-badge ${cls}">${label}</span>
     </div>`;
   }).join('');

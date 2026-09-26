@@ -496,7 +496,13 @@ async function renderScreen(root, { date, dayRoute }) {
 
   const sectionTitle = dayRoute && date !== todayStr ? 'Steps' : "Today's steps";
 
-  const hasPhoto = Object.values(day.steps || {}).some((e) => e && e.photoId);
+  // Only steps still present in the challenge count — a step removed from
+  // the challenge but still recorded on an old day (a "ghost" entry) is
+  // skipped, matching buildDaySummary.
+  const hasPhoto = challenge.steps.some((step) => {
+    const entry = day.steps && day.steps[step.id];
+    return !!(entry && entry.photoId);
+  });
   const summaryBtnHtml = dayRoute && (ctx.status === 'green' || hasPhoto)
     ? `<button type="button" class="btn btn-secondary" data-role="view-summary" data-date="${esc(date)}">View summary</button>`
     : '';
