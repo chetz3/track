@@ -11,7 +11,11 @@
 // debounced `resize` listener re-renders the charts to match. That listener
 // is registered once at module load (not per-render) so it never leaks, and
 // it only acts while the current route is actually #/stats and the
-// container it would redraw into is still attached.
+// container it would redraw into is still attached. It also skips redrawing
+// when the container's width hasn't actually changed — mobile browsers fire
+// `resize` when the address bar collapses/expands (a height-only change),
+// which would otherwise replay the ring/line-draw animations and reset zoom
+// on every scroll.
 
 import * as store from '../store.js';
 import { esc } from './dom.js';
@@ -20,14 +24,17 @@ import { collectNumberSeries, trendDomain, ringStats } from '../chartMath.js';
 // ---------- resize handling (module-level, registered once) ----------
 
 let currentRoot = null;
+let lastRenderedWidth = null;
 let resizeTimer = null;
 
 function scheduleResizeRerender() {
   if (resizeTimer) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
-    if (location.hash !== '#/stats') return;
+    const top = location.hash.replace(/^#\/?/, '').split('/')[0];
+    if (top !== 'stats') return;
     if (!currentRoot || !currentRoot.isConnected) return;
+    if (currentRoot.clientWidth === lastRenderedWidth) return; // height-only resize (e.g. mobile address bar)
     renderStats(currentRoot);
   }, 150);
 }
@@ -38,6 +45,7 @@ window.addEventListener('resize', scheduleResizeRerender);
 
 export function renderStats(root) {
   currentRoot = root;
+  lastRenderedWidth = root.clientWidth;
 
   const challenge = store.selected();
   if (!challenge) {
@@ -71,12 +79,15 @@ export function renderStats(root) {
   const series = collectNumberSeries(challenge, daysMap);
 
   const seriesHtml = series.length
-    ? series.map((s, i) => `
+    ? series.map((s, i) => {
+      const unitSuffix = s.step.number.unit ? ` (${esc(s.step.number.unit)})` : '';
+      return `
       <div class="section">
-        <p class="section-header">${esc(s.step.name)} — ${esc(s.step.number.label)} (${esc(s.step.number.unit)})</p>
+        <p class="section-header">${esc(s.step.name)} — ${esc(s.step.number.label)}${unitSuffix}</p>
         <div class="group trend-group" data-trend-index="${i}"></div>
       </div>
-    `).join('')
+    `;
+    }).join('')
     : `<p class="section-footer">Add a number field to a step to see trends here.</p>`;
 
   root.innerHTML = `
@@ -88,7 +99,7 @@ export function renderStats(root) {
         <div class="ring-mount"></div>
         <div class="ring-legend">
           <div class="ring-legend-col">
-            <div class="ring-legend-value accent">Day ${stats.day}/${stats.totalDays}</div>
+            <div class="ring-legend-value accent">${stats.day}/${stats.totalDays}</div>
             <div class="ring-legend-label">Day</div>
           </div>
           <div class="ring-legend-col">
@@ -150,7 +161,13 @@ export function renderTrendChart(el, { title, unit, points }) {
   const d3 = window.d3;
   if (points.length === 0) { el.innerHTML = `<p class="section-footer">No ${esc(title)} entries yet.</p>`; return; }
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const width = Math.max(280, el.clientWidth), height = 220, m = { top: 16, right: 12, bottom: 28, left: 40 };
+  // `el` is the padded `.trend-group` mount itself, so its clientWidth
+  // includes left+right padding; subtract that so the SVG's viewBox (which
+  // fills the mount edge-to-edge) matches the available content width
+  // instead of running ~32px too wide.
+  const cs = getComputedStyle(el);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const width = Math.max(280, el.clientWidth - padX), height = 220, m = { top: 16, right: 12, bottom: 28, left: 40 };
   const parse = d3.timeParse('%Y-%m-%d');
   const data = points.map((p) => ({ date: parse(p.date), value: p.value }));
   const x0 = d3.scaleTime().range([m.left, width - m.right]);
@@ -198,10 +215,18 @@ export function renderTrendChart(el, { title, unit, points }) {
     if (!d) return;
     focus.style('opacity', 1).attr('transform', `translate(${x(d.date)},0)`);
     focusDot.attr('cy', y(d.value));
-    tip.style('opacity', 1).text(`${fmt(d.date)} · ${d.value} ${unit}`);
+    tip.style('opacity', 1).text(unit ? `${fmt(d.date)} · ${d.value} ${unit}` : `${fmt(d.date)} · ${d.value}`);
   }).on('pointerleave', () => { focus.style('opacity', 0); tip.style('opacity', 0); });
   if (data.length > 1) {
     const zoom = d3.zoom().scaleExtent([1, 8])
+      // d3.zoom's default filter accepts a one-finger touchstart and its
+      // touchmove handler calls preventDefault, which blocks vertical page
+      // scroll over the chart on phones (`touch-action: pan-y` has no effect
+      // against a non-passive handler). Restrict zoom-initiation to pinch
+      // (2+ touches), wheel and mouse, so a single-finger swipe still
+      // scrolls the page; the crosshair tooltip on pointermove/pointerdown
+      // is untouched, so a single tap still shows a value.
+      .filter((e) => (!e.ctrlKey || e.type === 'wheel') && !e.button && !(e.type === 'touchstart' && e.touches.length < 2))
       .extent([[m.left, 0], [width - m.right, height]])
       .translateExtent([[m.left, 0], [width - m.right, height]])
       .on('zoom', (event) => { x = event.transform.rescaleX(x0); draw(); });
