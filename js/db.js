@@ -51,9 +51,16 @@ function openDB() {
       if (event.oldVersion === 1) migrateFromV1(db, tx);
       else if (!db.objectStoreNames.contains('days')) createDaysStore(db);
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-    req.onblocked = () => reject(new Error('Close other tabs of this app and reload.'));
+    req.onsuccess = () => {
+      const idb = req.result;
+      // Another tab upgrading the schema (or a same-tab reload racing this
+      // one) fires versionchange here; closing lets that other open()
+      // proceed instead of onblocked-ing it forever.
+      idb.onversionchange = () => idb.close();
+      resolve(idb);
+    };
+    req.onerror = () => { dbPromise = null; reject(req.error); };
+    req.onblocked = () => { dbPromise = null; reject(new Error('Close other tabs of this app and reload.')); };
   });
   return dbPromise;
 }

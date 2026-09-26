@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v5';
+const CACHE_NAME = 'tracker-shell-v6';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -35,7 +35,10 @@ const FONT_ORIGINS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(SHELL_FILES))
+      // `cache: 'reload'` forces each shell file past the HTTP cache so a
+      // stale disk-cached response (e.g. an old index.html served with a
+      // long max-age) can never get baked into a fresh precache.
+      .then((cache) => cache.addAll(SHELL_FILES.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting()),
   );
 });
@@ -56,12 +59,19 @@ self.addEventListener('fetch', (event) => {
 
   if (url.origin === self.location.origin) {
     event.respondWith(
-      caches.match(event.request).then((cached) => {
-        const networkFetch = fetch(event.request)
+      caches.match(event.request, { cacheName: CACHE_NAME }).then((cached) => {
+        // `cache: 'no-cache'` makes the browser revalidate with the server
+        // (conditional GET) instead of serving a disk-cached response, so
+        // the stale-while-revalidate background fetch actually has a chance
+        // of seeing a change. The revalidation itself is wrapped in
+        // event.waitUntil so the service worker isn't killed mid-write —
+        // without it, a fetch that outlives the event that started it can be
+        // torn down before cache.put ever runs.
+        const networkFetch = fetch(event.request, { cache: 'no-cache' })
           .then((response) => {
             if (response && response.status === 200) {
               const clone = response.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+              event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone)));
             }
             return response;
           })
@@ -74,17 +84,18 @@ self.addEventListener('fetch', (event) => {
 
   if (FONT_ORIGINS.includes(url.origin)) {
     event.respondWith(
-      caches.open(FONTS_CACHE_NAME).then((cache) => cache.match(event.request).then((cached) => {
+      caches.match(event.request, { cacheName: FONTS_CACHE_NAME }).then((cached) => {
         if (cached) return cached;
         return fetch(event.request).then((response) => {
           // Opaque cross-origin responses (status 0) are allowed for gstatic;
           // only skip caching on an actual network failure.
           if (response && (response.ok || response.type === 'opaque')) {
-            cache.put(event.request, response.clone());
+            const clone = response.clone();
+            event.waitUntil(caches.open(FONTS_CACHE_NAME).then((cache) => cache.put(event.request, clone)));
           }
           return response;
         });
-      })),
+      }),
     );
   }
   // Other cross-origin requests: let them go straight to the network.

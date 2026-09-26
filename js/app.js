@@ -219,19 +219,39 @@ store.onChange(() => scheduleRender());
 
 // ---------- boot ----------
 
-async function boot() {
-  await store.loadAll();
-  try {
-    await navigator.storage?.persist?.();
-  } catch (_) {
-    // not available/denied — non-fatal
-  }
-  // No explicit `#/today` write here: matchRoute() already treats a blank
-  // hash as `today`, and writing it would fire a redundant hashchange.
-  await render();
+// Shown when boot() itself throws — e.g. IndexedDB failed to open (blocked by
+// another tab, private-mode quota, a corrupt DB) or store.loadAll() choked on
+// bad data. Without this the app was a permanently blank white screen with no
+// way out but to already know to hard-reload.
+function renderBootError(err) {
+  console.error('Boot failed:', err);
+  tabbarEl.hidden = true;
+  appEl.innerHTML = `
+    <h1 class="large-title">Couldn't open your data</h1>
+    <p class="subtitle">${esc(err && err.message)}</p>
+    <p class="section-footer">If the app is open in another tab or window, close it, then reload.</p>
+    <button type="button" class="btn btn-primary" data-role="boot-reload">Reload</button>
+  `;
+  appEl.querySelector('[data-role="boot-reload"]').addEventListener('click', () => location.reload());
+}
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+async function boot() {
+  try {
+    await store.loadAll();
+    try {
+      await navigator.storage?.persist?.();
+    } catch (_) {
+      // not available/denied — non-fatal
+    }
+    // No explicit `#/today` write here: matchRoute() already treats a blank
+    // hash as `today`, and writing it would fire a redundant hashchange.
+    await render();
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+  } catch (err) {
+    renderBootError(err);
   }
 }
 
