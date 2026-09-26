@@ -123,7 +123,7 @@ function challengeRowHtml(challenge, selectedId) {
     ${miniRing(dayNumber, totalDays, 32)}
     <div class="row-label">
       <div>${esc(challenge.name)}${dot}</div>
-      <div class="item-sub">Day ${dayNumber} of ${totalDays} · Week ${weekNum} ${green}/${weekTarget}</div>
+      <div class="item-sub">Day ${esc(dayNumber)} of ${esc(totalDays)} · Week ${esc(weekNum)} ${esc(green)}/${esc(weekTarget)}</div>
     </div>
   </div>`;
 }

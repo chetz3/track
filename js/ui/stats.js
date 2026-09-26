@@ -99,11 +99,11 @@ export function renderStats(root) {
         <div class="ring-mount"></div>
         <div class="ring-legend">
           <div class="ring-legend-col">
-            <div class="ring-legend-value accent">${stats.day}/${stats.totalDays}</div>
+            <div class="ring-legend-value accent">${esc(stats.day)}/${esc(stats.totalDays)}</div>
             <div class="ring-legend-label">Day</div>
           </div>
           <div class="ring-legend-col">
-            <div class="ring-legend-value green">${stats.weeksPassed}/${stats.totalWeeks}</div>
+            <div class="ring-legend-value green">${esc(stats.weeksPassed)}/${esc(stats.totalWeeks)}</div>
             <div class="ring-legend-label">Weeks passed</div>
           </div>
           <div class="ring-legend-col">

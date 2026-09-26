@@ -89,7 +89,7 @@ export async function exportBackup() {
 
 // Upgrades a v1-shaped backup (or passes through a v2 one) to the v2 shape
 // using the same pure migration the IndexedDB in-upgrade path uses.
-function toV2(backup) {
+export function toV2(backup) {
   if (backup.version === 2) return backup;
   if (Array.isArray(backup.config) || backup.version === 1) {
     const v1config = Array.isArray(backup.config) ? backup.config[0] : undefined;
@@ -103,19 +103,63 @@ function isObject(x) {
   return !!x && typeof x === 'object' && !Array.isArray(x);
 }
 
+const STEP_PHOTO_VALUES = new Set(['none', 'optional', 'required']);
+const STEP_NOTE_VALUES = new Set(['none', 'optional']);
+
+// A step's `number` field is either null or an object describing a numeric
+// input (weight, reps, ...): { label: string, unit: string, required: boolean }.
+function isValidNumberField(n) {
+  if (n === null) return true;
+  if (!isObject(n)) return false;
+  return typeof n.label === 'string' && typeof n.unit === 'string' && typeof n.required === 'boolean';
+}
+
+// Matches exactly the shape migrate.js and js/ui/stepEditor.js produce (see
+// BODY_STEP/migrateStep and doSave): id/name are strings, photo/note are one
+// of a small fixed set of values (never missing — both migration paths and
+// the step editor always set them), and number is null or a well-shaped object.
+function isValidStep(s) {
+  if (!isObject(s)) return false;
+  if (typeof s.id !== 'string' || s.id.length === 0) return false;
+  if (typeof s.name !== 'string') return false;
+  if ('mandatory' in s && typeof s.mandatory !== 'boolean') return false;
+  if (!STEP_PHOTO_VALUES.has(s.photo)) return false;
+  if (!STEP_NOTE_VALUES.has(s.note)) return false;
+  if (!isValidNumberField(s.number)) return false;
+  return true;
+}
+
+// Rejects anything that would let a crafted backup smuggle a non-numeric
+// totalDays/weeklyTarget (stored XSS once interpolated into innerHTML
+// elsewhere) or an out-of-range one (e.g. 1e9, which hangs evaluateAttempt's
+// day-by-day walk on every boot).
+function isValidChallenge(c) {
+  if (!isObject(c)) return false;
+  if (typeof c.id !== 'string' || c.id.length === 0) return false;
+  if (typeof c.name !== 'string' || c.name.length === 0) return false;
+  if (!Number.isInteger(c.totalDays) || c.totalDays < 1 || c.totalDays > 1000) return false;
+  if (!Number.isInteger(c.weeklyTarget) || c.weeklyTarget < 1 || c.weeklyTarget > 7) return false;
+  if (!Array.isArray(c.steps) || !c.steps.every(isValidStep)) return false;
+  return true;
+}
+
 export function validateV2(b) {
   const bad = () => { throw new Error('Invalid backup file'); };
   if (!Array.isArray(b.challenges) || !Array.isArray(b.attempts) || !Array.isArray(b.days) || !Array.isArray(b.photos)) bad();
   const ids = new Set();
   for (const c of b.challenges) {
-    if (!isObject(c) || typeof c.id !== 'string' || !Array.isArray(c.steps)) bad();
+    if (!isValidChallenge(c)) bad();
     ids.add(c.id);
   }
   for (const a of b.attempts) {
     if (!isObject(a) || typeof a.id !== 'string' || !ids.has(a.challengeId) || !DATE_RE.test(a.startDate)) bad();
+    if ('greenWeeks' in a && !(Number.isInteger(a.greenWeeks) && a.greenWeeks >= 0)) bad();
   }
   for (const d of b.days) {
     if (!isObject(d) || !DATE_RE.test(d.date) || !ids.has(d.challengeId) || d.key !== dayKey(d.challengeId, d.date)) bad();
+    // steps must be a plain object (not null, not an array) — loadAll/reevaluate
+    // iterate it with Object.entries/Object.values and crash on anything else.
+    if (!isObject(d.steps)) bad();
   }
   for (const p of b.photos) {
     if (!isObject(p) || typeof p.id !== 'string' || p.id.length === 0) bad();

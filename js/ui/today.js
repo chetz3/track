@@ -148,7 +148,7 @@ export function miniRing(done, total, sizePx) {
   const rawPct = total > 0 ? done / total : 0;
   const pct = Number.isFinite(rawPct) ? Math.min(1, Math.max(0, rawPct)) : 0;
   const center = size / 2;
-  let svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="mini-ring" role="img" aria-label="${done} of ${total}">` +
+  let svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="mini-ring" role="img" aria-label="${esc(done)} of ${esc(total)}">` +
     `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--raised)" stroke-width="${stroke}" />`;
   if (pct > 0) {
     const dash = c * pct;
@@ -727,8 +727,8 @@ async function renderScreen(root, { date, dayRoute }) {
     <div class="row">
       ${miniRing(ctx.dayNumber, ctx.totalDays, 44)}
       <div class="row-label">
-        <div class="day-line">Day <span class="day-num">${ctx.dayNumber}</span> of ${ctx.totalDays}</div>
-        <div class="week-line">Week ${ctx.weekNum} · ${ctx.green}/${ctx.weekTarget} green</div>
+        <div class="day-line">Day <span class="day-num">${esc(ctx.dayNumber)}</span> of ${esc(ctx.totalDays)}</div>
+        <div class="week-line">Week ${esc(ctx.weekNum)} · ${esc(ctx.green)}/${esc(ctx.weekTarget)} green</div>
       </div>
       <span class="pill ${ctx.status}${pop ? ' pop' : ''}">${PILL_LABELS[ctx.status] || ctx.status}</span>
     </div>
