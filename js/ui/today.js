@@ -53,7 +53,12 @@ let focusRecord = null;
 // for that — a deep link opened in an already-used tab still has history
 // entries, just none of them are this app).
 let navigatedInApp = false;
-window.addEventListener('hashchange', () => { navigatedInApp = true; focusRecord = null; });
+// Set true the instant Done/"‹ Back" is activated (see wireDelegation) and
+// cleared here once the resulting navigation actually lands, so a second
+// activation before then (e.g. an accidental double-tap) can't fire a
+// second history.back()/hash change on top of the first.
+let navigating = false;
+window.addEventListener('hashchange', () => { navigatedInApp = true; navigating = false; focusRecord = null; });
 
 // Per-step save error, keyed the same way as expandedKey
 // (`${challengeId}:${date}:${stepId}`), shown as an inline red footer under
@@ -248,11 +253,18 @@ function expandedRowsHtml(step, entry, fieldCtx) {
 
 function editableStepRowHtml(step, entry, expanded, fieldCtx) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
+  // A save error on this step shows expanded (as the shared footer in
+  // expandedRowsHtml, right under its fields) or, collapsed, as this short
+  // line under the step name — either way the user shouldn't have to
+  // re-expand a collapsed, failed step just to find out something's wrong.
+  const errorMessage = !expanded && photoErrorByKey.get(`${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`);
+  const collapsedErrorHtml = errorMessage ? `<div class="step-error">${esc(errorMessage)}</div>` : '';
   let html = `<div class="row" data-role="step-row" data-step-id="${esc(step.id)}" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <input type="checkbox" class="check" data-role="check" ${entry.done ? 'checked' : ''} />
     <div class="row-label">
       <div>${esc(step.name)}</div>
       ${requiredCaption}
+      ${collapsedErrorHtml}
     </div>
     <div class="step-summary">${stepSummaryHtml(step, entry)}</div>
   </div>`;
@@ -413,7 +425,7 @@ function findPhotoInput(root, ctx, stepId) {
 
 // ---------- delegated event wiring (attached once per root) ----------
 
-// Shared by the pointerdown fast-path and the click fallback below.
+// Shared by the two click branches below.
 function navigateBackOrDone(isDone) {
   // Today has nowhere to "go back" to that makes sense — Calendar is the
   // natural place to land after finishing today's steps. Day detail (only
@@ -431,28 +443,32 @@ function wireDelegation(root) {
   root.addEventListener('input', trackFocusValue);
   root.addEventListener('focusout', forgetFocusIfLeft);
 
-  // "‹ Back"/"Done" navigate on pointerdown, not click: editing a note or
-  // number blurs it first (mousedown moves focus before click fires), whose
-  // `change` handler awaits store.updateStep -> notify() -> a rAF re-render
-  // that can replace the button between mousedown and mouseup — the browser
-  // then has no element to fire `click` on, and the tap is silently lost.
-  // Acting on pointerdown beats that re-render every time. `pointerHandled`
-  // then suppresses the `click` that (usually) still follows, so activation
-  // doesn't fire twice; a `click` with no preceding pointerdown (keyboard
-  // Enter/Space) still works normally. The pending field save itself is
-  // unaffected either way: its handler already reads challenge/date/step off
-  // the DOM via fieldContext, not off the screen that's about to disappear.
-  let pointerHandled = false;
-
-  root.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    const backBtn = e.target.closest('[data-role="back"]');
-    const doneBtn = e.target.closest('[data-role="done"]');
-    if (!backBtn && !doneBtn) return;
-    pointerHandled = true;
-    setTimeout(() => { pointerHandled = false; }, 0); // self-heals if click never follows (e.g. drag-off)
-    navigateBackOrDone(!!doneBtn);
+  // Round-2 fix: pointerdown-based navigation (round 1) had three problems —
+  // on touch it fires at touchstart, so the re-render it triggers can rip a
+  // focused note/number field out from under an in-progress edit before its
+  // blur/change ever fires, losing the edit; a scroll that merely started on
+  // the full-width Done button would navigate away; and the double-fire
+  // guard reset on a 0ms timeout, long before `click` actually fires, so it
+  // never actually prevented a double `history.back()`.
+  //
+  // Instead: `mousedown` on Done/"‹ Back" only calls preventDefault(), which
+  // stops the button from stealing focus — mouse, touch-compatibility, and
+  // keyboard activation all still produce a normal `click`, and nothing
+  // moves until then. The `click` handler blurs whatever field is currently
+  // focused *before* navigating — synchronously, while it's still attached —
+  // so that field's own change handler fires and saves via fieldContext
+  // exactly as if the user had tabbed away normally, and only then leaves
+  // the screen. `navigating` (module-level, reset by the hashchange listener
+  // above) blocks a second activation before the resulting hash change has
+  // had a chance to land.
+  root.addEventListener('mousedown', (e) => {
+    if (e.target.closest('[data-role="back"], [data-role="done"]')) e.preventDefault();
   });
+
+  const blurActiveField = () => {
+    const active = document.activeElement;
+    if (active && root.contains(active) && active.matches('input, textarea')) active.blur();
+  };
 
   root.addEventListener('click', (e) => {
     const switchBtn = e.target.closest('[data-role="switch-challenge"]');
@@ -462,13 +478,17 @@ function wireDelegation(root) {
     }
     const backBtn = e.target.closest('[data-role="back"]');
     if (backBtn) {
-      if (pointerHandled) { pointerHandled = false; return; }
-      goBack();
+      if (navigating) return;
+      navigating = true;
+      blurActiveField();
+      navigateBackOrDone(false);
       return;
     }
     const doneBtn = e.target.closest('[data-role="done"]');
     if (doneBtn) {
-      if (pointerHandled) { pointerHandled = false; return; }
+      if (navigating) return;
+      navigating = true;
+      blurActiveField();
       navigateBackOrDone(true);
       return;
     }
@@ -480,8 +500,9 @@ function wireDelegation(root) {
     const stepRow = e.target.closest('[data-role="step-row"]');
     if (stepRow && !e.target.closest('[data-role="check"]')) {
       const stepId = stepRow.dataset.stepId;
-      const rowCtx = fieldContext(stepRow);
-      if (rowCtx) photoErrorByKey.delete(`${rowCtx.challengeId}:${rowCtx.date}:${stepId}`);
+      // A row error persists across expand/collapse — it only ever clears
+      // on the next successful save for this step (see each change handler)
+      // — so collapsing or re-expanding it doesn't quietly hide a failure.
       expandedStepId = expandedStepId === stepId ? null : stepId;
       current?.rerender();
       return;
