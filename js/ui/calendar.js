@@ -28,9 +28,10 @@ function shiftMonth(yyyyMm, delta) {
 
 // ---------- calendar (#/calendar[/:month]) ----------
 
-// A day's route (Task 8A adds a green-day branch to the summary viewer).
+// A day's route: green days open the full-screen summary viewer, everything
+// else opens day detail.
 function dayHref(status, date) {
-  return `#/day/${date}`;
+  return status === 'green' ? `#/summary/${date}` : `#/day/${date}`;
 }
 
 function calendarCellHtml(date, status, isToday) {

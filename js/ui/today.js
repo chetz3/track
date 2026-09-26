@@ -342,6 +342,11 @@ function wireDelegation(root) {
       location.hash = '#/today';
       return;
     }
+    const summaryBtn = e.target.closest('[data-role="view-summary"]');
+    if (summaryBtn) {
+      location.hash = `#/summary/${summaryBtn.dataset.date}`;
+      return;
+    }
     const stepRow = e.target.closest('[data-role="step-row"]');
     if (stepRow && !e.target.closest('[data-role="check"]')) {
       const stepId = stepRow.dataset.stepId;
@@ -491,8 +496,14 @@ async function renderScreen(root, { date, dayRoute }) {
 
   const sectionTitle = dayRoute && date !== todayStr ? 'Steps' : "Today's steps";
 
+  const hasPhoto = Object.values(day.steps || {}).some((e) => e && e.photoId);
+  const summaryBtnHtml = dayRoute && (ctx.status === 'green' || hasPhoto)
+    ? `<button type="button" class="btn btn-secondary" data-role="view-summary" data-date="${esc(date)}">View summary</button>`
+    : '';
+
   root.innerHTML = `${headerHtml}
     ${heroHtml}
+    ${summaryBtnHtml}
     <div class="section">
       <h2 class="section-header">${sectionTitle}</h2>
       <div class="group">${stepsHtml}</div>

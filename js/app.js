@@ -14,6 +14,7 @@ import { esc, revokePhotosIn } from './ui/dom.js';
 import { renderToday, renderDay } from './ui/today.js';
 import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
+import { renderSummary } from './ui/summary.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -40,7 +41,7 @@ const ROUTES = {
   challenges: renderChallenges,
   'challenges/new': (root) => renderChallengeForm(root, 'new'),
   'challenges/:id': (root, params) => renderChallengeForm(root, params.id),
-  'summary/:date': placeholder('Summary'),
+  'summary/:date': (root, params) => renderSummary(root, params.date),
 };
 
 // ---------- hash parsing ----------
@@ -182,6 +183,7 @@ async function render() {
     showTabbar = false;
   } else {
     if (key === 'challenges/new' && !hasChallenges) showTabbar = false;
+    if (key === 'summary/:date') showTabbar = false; // full-screen route, like the empty state
     const renderFn = ROUTES[key] || ROUTES.today;
     await renderFn(container, params);
   }
