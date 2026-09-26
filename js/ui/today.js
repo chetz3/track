@@ -55,6 +55,47 @@ window.addEventListener('hashchange', () => { focusRecord = null; });
 // renderScreen's key check).
 const photoErrorByKey = new Map();
 
+// Steps whose photo is currently being processed (resize + IndexedDB write),
+// keyed the same way as photoErrorByKey. While a key is present, the photo
+// row's buttons show "Saving…" and are disabled instead of sitting silent —
+// the whole point being the user sees *something* happening.
+const savingByKey = new Map();
+
+// The most recent successful save on the currently-viewed screen, so a
+// "Saved ✓" indicator can show for a short window afterwards. Scoped to
+// challenge+date (not per-step) since it reflects "this screen just saved
+// something", not any one field. `hideTimer` re-renders once when the
+// window expires — nothing else would otherwise trigger a re-render to hide
+// it, since no further store change happens.
+const SAVED_INDICATOR_MS = 1500;
+let lastSaved = null; // { challengeId, date, at } | null
+let savedHideTimer = null;
+
+function markSaved(ctx) {
+  lastSaved = { challengeId: ctx.challengeId, date: ctx.date, at: Date.now() };
+  if (savedHideTimer) clearTimeout(savedHideTimer);
+  savedHideTimer = setTimeout(() => {
+    savedHideTimer = null;
+    if (current && current.challengeId === ctx.challengeId && current.date === ctx.date) current.rerender();
+  }, SAVED_INDICATOR_MS);
+}
+
+// Shared by the "‹ Back" button and the "Done" button on an editable Day
+// detail screen: return to wherever the user came from, falling back to the
+// calendar when there's nowhere in this tab's history to go back to (e.g.
+// the day was opened via a direct link).
+function goBack() {
+  if (history.length > 1) history.back();
+  else location.hash = '#/calendar';
+}
+
+function messageForPhotoError(err) {
+  const code = err && err.code;
+  if (code === 'UNSUPPORTED_IMAGE') return "This photo format isn't supported here. Try a JPEG or PNG, or take a new photo.";
+  if (code === 'IMAGE_ENCODE_FAILED') return "Couldn't process this photo. Try a smaller one or take a new photo.";
+  return "Couldn't save the photo. Please try again.";
+}
+
 const PILL_LABELS = { green: 'Complete', red: 'Missed', pending: 'In progress', future: 'Upcoming', outside: 'Outside attempt' };
 
 // ---------- mini progress ring (reused by Task 7) ----------
@@ -132,12 +173,15 @@ function stepSummaryHtml(step, entry) {
 // fieldContext) instead of a shared module variable that a later render
 // (of a different challenge/day) would have already overwritten by the
 // time an in-flight async action — e.g. the photo picker — resolves.
-function photoRowHtml(step, entry, fieldCtx, errorMessage) {
+function photoRowHtml(step, entry, fieldCtx, errorMessage, isSaving) {
+  const disabledAttr = isSaving ? ' disabled' : '';
+  const takeLabel = isSaving ? 'Saving…' : 'Take photo';
+  const libraryLabel = isSaving ? 'Saving…' : 'Library';
   const rowHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <div class="btn-pair">
-      <button type="button" class="btn btn-primary photo-field-btn" data-role="camera-btn" data-step-id="${esc(step.id)}">Take photo</button>
-      <label class="btn btn-secondary photo-field-btn">Library
-        <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}" />
+      <button type="button" class="btn btn-primary photo-field-btn" data-role="camera-btn" data-step-id="${esc(step.id)}"${disabledAttr}>${esc(takeLabel)}</button>
+      <label class="btn btn-secondary photo-field-btn">${esc(libraryLabel)}
+        <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}"${disabledAttr} />
       </label>
     </div>
   </div>`;
@@ -165,8 +209,10 @@ function noteRowHtml(step, entry, fieldCtx) {
 function expandedRowsHtml(step, entry, fieldCtx) {
   let html = '';
   if (step.photo !== 'none') {
-    const errorMessage = photoErrorByKey.get(`${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`);
-    html += photoRowHtml(step, entry, fieldCtx, errorMessage);
+    const photoKey = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
+    const errorMessage = photoErrorByKey.get(photoKey);
+    const isSaving = savingByKey.has(photoKey);
+    html += photoRowHtml(step, entry, fieldCtx, errorMessage, isSaving);
   }
   if (step.number) html += numberRowHtml(step, entry, fieldCtx);
   if (step.note !== 'none') html += noteRowHtml(step, entry, fieldCtx);
@@ -292,20 +338,43 @@ function restoreFocus(root, challengeId, date) {
 async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
   if (!file) return;
   const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
-  if (!fromCamera) {
-    const photoDate = await photoDateOf(file);
-    if (photoDate !== ctx.date) {
-      photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
-      // Only re-render if this row is still the one on screen — a rejection
-      // that resolves after the user has navigated elsewhere shouldn't yank
-      // them back or re-render a now-unrelated screen.
-      if (current && current.challengeId === ctx.challengeId && current.date === ctx.date) current.rerender();
-      return;
+  // Only re-render if this row is still the one on screen — a save/rejection
+  // that resolves after the user has navigated elsewhere shouldn't yank them
+  // back or re-render a now-unrelated screen.
+  const rerenderIfCurrent = () => {
+    if (current && current.challengeId === ctx.challengeId && current.date === ctx.date) current.rerender();
+  };
+  try {
+    if (!fromCamera) {
+      const photoDate = await photoDateOf(file);
+      if (photoDate !== ctx.date) {
+        photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
+        rerenderIfCurrent();
+        return;
+      }
     }
+    photoErrorByKey.delete(key);
+    savingByKey.set(key, true);
+    rerenderIfCurrent(); // show "Saving…" right away, before the (possibly slow) resize/write below
+    const photoId = await savePhoto(file);
+    await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
+    // Cleared before markSaved's (or store.updateStep's own, deferred)
+    // re-render runs, so it never renders a still-"Saving…" row on top of
+    // the now-saved photo.
+    savingByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    // resizeImage (js/photos.js) can reject for a file the browser can't
+    // decode (HEIC on desktop Chrome/Firefox, a corrupt file) or one whose
+    // canvas encode fails; either way, this used to fail silently.
+    console.error('Photo save failed:', err);
+    // Cleared *before* rerenderIfCurrent(), which (unlike the store-driven
+    // path above) rebuilds the DOM synchronously right here — clearing it
+    // after would leave a stuck "Saving…" row next to the error message.
+    savingByKey.delete(key);
+    photoErrorByKey.set(key, messageForPhotoError(err));
+    rerenderIfCurrent();
   }
-  photoErrorByKey.delete(key);
-  const photoId = await savePhoto(file);
-  await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
 }
 
 // Re-queries the library input for (ctx, stepId) against the *live* root at
@@ -339,7 +408,17 @@ function wireDelegation(root) {
     }
     const backBtn = e.target.closest('[data-role="back"]');
     if (backBtn) {
-      location.hash = '#/today';
+      goBack();
+      return;
+    }
+    const doneBtn = e.target.closest('[data-role="done"]');
+    if (doneBtn) {
+      // Today has nowhere to "go back" to that makes sense — Calendar is the
+      // natural place to land after finishing today's steps. Day detail
+      // (only editable for yesterday) uses the same "back to wherever this
+      // was opened from" behaviour as the back button.
+      if (location.hash.startsWith('#/day/')) goBack();
+      else location.hash = '#/calendar';
       return;
     }
     const summaryBtn = e.target.closest('[data-role="view-summary"]');
@@ -376,6 +455,7 @@ function wireDelegation(root) {
       if (!ctx) return;
       const stepId = check.closest('[data-role="step-row"]').dataset.stepId;
       await store.updateStep(ctx.challengeId, ctx.date, stepId, { done: check.checked });
+      markSaved(ctx);
       return;
     }
 
@@ -391,6 +471,7 @@ function wireDelegation(root) {
       if (raw.trim() === '') {
         numberInput.classList.remove('invalid');
         await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: undefined });
+        markSaved(ctx);
         // Field still owns the record: nothing typed left to write back over
         // the now-cleared stored value on the next re-render.
         if (matchesFocusRecord()) focusRecord.value = '';
@@ -403,6 +484,7 @@ function wireDelegation(root) {
       }
       numberInput.classList.remove('invalid');
       await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: parsed });
+      markSaved(ctx);
       // Normalise the tracked value to what was actually stored (e.g. "3,5"
       // -> "3.5") so restoreFocus doesn't write the raw comma form back over
       // it on the next store-driven re-render.
@@ -416,6 +498,7 @@ function wireDelegation(root) {
       if (!ctx) return;
       const stepId = noteInput.dataset.stepId;
       await store.updateStep(ctx.challengeId, ctx.date, stepId, { note: noteInput.value });
+      markSaved(ctx);
       return;
     }
 
@@ -507,13 +590,27 @@ async function renderScreen(root, { date, dayRoute }) {
     ? `<button type="button" class="btn btn-secondary" data-role="view-summary" data-date="${esc(date)}">View summary</button>`
     : '';
 
+  // "Saved ✓" always renders (reserving its line so it never shifts layout
+  // on appearing/disappearing) but only becomes visible for a short window
+  // right after a save on *this* challenge/date (see markSaved). Both this
+  // and the Done button below are editable-only: a read-only day has
+  // nothing to save and the "‹ Back" button already gets you out of it.
+  const showSaved = editable && lastSaved && lastSaved.challengeId === challenge.id && lastSaved.date === date &&
+    Date.now() - lastSaved.at < SAVED_INDICATOR_MS;
+  const savedIndicatorHtml = editable
+    ? `<div class="section-footer saved-indicator${showSaved ? ' visible' : ''}" aria-live="polite">Saved ✓</div>`
+    : '';
+  const doneBtnHtml = editable ? `<button type="button" class="btn btn-primary" data-role="done">Done</button>` : '';
+
   root.innerHTML = `${headerHtml}
     ${heroHtml}
     ${summaryBtnHtml}
     <div class="section">
       <h2 class="section-header">${sectionTitle}</h2>
       <div class="group">${stepsHtml}</div>
-    </div>`;
+      ${savedIndicatorHtml}
+    </div>
+    ${doneBtnHtml}`;
 
   wireDelegation(root);
   restoreFocus(root, challenge.id, date);

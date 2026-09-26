@@ -34,16 +34,26 @@ function resizeImage(file, maxDim = MAX_DIMENSION, quality = JPEG_QUALITY) {
       canvas.toBlob(
         (blob) => {
           URL.revokeObjectURL(url);
-          if (blob) resolve(blob);
-          else reject(new Error('Failed to encode image'));
+          if (blob) {
+            resolve(blob);
+          } else {
+            const e = new Error('Failed to encode image');
+            e.code = 'IMAGE_ENCODE_FAILED';
+            reject(e);
+          }
         },
         'image/jpeg',
         quality,
       );
     };
-    img.onerror = (err) => {
+    // The browser couldn't decode this as an image at all — most commonly a
+    // HEIC file on desktop Chrome/Firefox (no built-in decoder), or a
+    // corrupt/truncated file.
+    img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(err);
+      const e = new Error('Unsupported image format');
+      e.code = 'UNSUPPORTED_IMAGE';
+      reject(e);
     };
     img.src = url;
   });

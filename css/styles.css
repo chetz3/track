@@ -80,7 +80,10 @@ body { padding: env(safe-area-inset-top) 0 calc(96px + env(safe-area-inset-botto
 .field-label { flex: none; color: var(--text2); }
 .field-unit { flex: none; color: var(--text2); }
 .photo-field-btn { flex: 1; height: 40px; }
+.photo-field-btn:has(input:disabled) { opacity: .5; cursor: default; } /* label isn't a <button>, so :disabled on the input needs its own rule */
 .row > .btn-pair { flex: 1; } /* the pair fills the row's width, same as a lone .photo-field-btn did */
+.saved-indicator { color: var(--green); min-height: 18px; visibility: hidden; } /* height always reserved so appearing/disappearing never shifts layout */
+.saved-indicator.visible { visibility: visible; }
 .row:has(textarea) { align-items: flex-start; }
 .invalid { color: var(--red) !important; }
 .ro-check { flex: none; font-weight: 700; color: var(--text2); }
