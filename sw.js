@@ -58,26 +58,28 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
   if (url.origin === self.location.origin) {
+    // `cache: 'no-cache'` makes the browser revalidate with the server
+    // (conditional GET) instead of serving a disk-cached response, so
+    // the stale-while-revalidate background fetch actually has a chance
+    // of seeing a change. The network fetch (and its cache write) is
+    // started synchronously and registered with event.waitUntil right
+    // here, before respondWith settles — waitUntil called later, inside
+    // a .then() that runs after respondWith has already resolved to the
+    // cached response, throws InvalidStateError and the cache is never
+    // updated.
+    const networkFetch = fetch(event.request, { cache: 'no-cache' }).then(async (response) => {
+      if (response && response.status === 200) {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(event.request, response.clone());
+      }
+      return response;
+    });
+    event.waitUntil(networkFetch.catch(() => {}));
     event.respondWith(
-      caches.match(event.request, { cacheName: CACHE_NAME }).then((cached) => {
-        // `cache: 'no-cache'` makes the browser revalidate with the server
-        // (conditional GET) instead of serving a disk-cached response, so
-        // the stale-while-revalidate background fetch actually has a chance
-        // of seeing a change. The revalidation itself is wrapped in
-        // event.waitUntil so the service worker isn't killed mid-write —
-        // without it, a fetch that outlives the event that started it can be
-        // torn down before cache.put ever runs.
-        const networkFetch = fetch(event.request, { cache: 'no-cache' })
-          .then((response) => {
-            if (response && response.status === 200) {
-              const clone = response.clone();
-              event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone)));
-            }
-            return response;
-          })
-          .catch(() => cached);
-        return cached || networkFetch;
-      }),
+      caches.match(event.request, { cacheName: CACHE_NAME })
+        .then((cached) => cached || networkFetch)
+        .catch(() => caches.match(event.request, { cacheName: CACHE_NAME }))
+        .then((res) => res || Response.error()),
     );
     return;
   }

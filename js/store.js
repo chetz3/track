@@ -181,12 +181,22 @@ export async function updateStep(challengeId, date, stepId, patch) {
   state.days[challengeId] = state.days[challengeId] || {};
   state.days[challengeId][date] = day;
 
-  if (patch.photoId && oldPhotoId && oldPhotoId !== patch.photoId) {
-    await deletePhoto(oldPhotoId);
-  }
+  // The day is now saved — updateStep must not throw past this point.
+  // Callers (e.g. today.js's handlePhotoFile) treat a thrown updateStep as
+  // "nothing was persisted" and clean up the photo they just wrote; once
+  // db.put above has succeeded, that cleanup would delete a photo the saved
+  // day now references. Best-effort cleanup/reevaluate/notify failures are
+  // logged instead of rethrown.
+  try {
+    if (patch.photoId && oldPhotoId && oldPhotoId !== patch.photoId) {
+      await deletePhoto(oldPhotoId);
+    }
 
-  await reevaluate(challengeId);
-  notify();
+    await reevaluate(challengeId);
+    notify();
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 function makeChallengeId() {
