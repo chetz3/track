@@ -46,13 +46,22 @@ let focusRecord = null;
 // freshly re-expanded field. Any real navigation changes location.hash;
 // store-driven re-renders (the case restoreFocus exists for) never do, so
 // this only fires on genuine navigation. Registered once at module load.
-window.addEventListener('hashchange', () => { focusRecord = null; });
+//
+// `navigatedInApp` latches true the first time this fires: goBack() uses it
+// to tell "there's real in-app history to go back to" apart from "this tab
+// was opened straight onto a deep link" (history.length > 1 is unreliable
+// for that — a deep link opened in an already-used tab still has history
+// entries, just none of them are this app).
+let navigatedInApp = false;
+window.addEventListener('hashchange', () => { navigatedInApp = true; focusRecord = null; });
 
-// Photo-date mismatch message per step, keyed the same way as expandedKey
+// Per-step save error, keyed the same way as expandedKey
 // (`${challengeId}:${date}:${stepId}`), shown as an inline red footer under
-// the photo row until the step is re-collapsed/expanded, a matching photo is
-// saved, or the screen navigates to a different challenge/day (see
-// renderScreen's key check).
+// that step's expanded fields until the step is re-collapsed/expanded, a
+// save on it succeeds, or the screen navigates to a different challenge/day
+// (see renderScreen's key check). Covers both the photo-date mismatch
+// message and a generic save failure from any field on the step (check,
+// number, note, or photo).
 const photoErrorByKey = new Map();
 
 // Steps whose photo is currently being processed (resize + IndexedDB write),
@@ -71,21 +80,39 @@ const SAVED_INDICATOR_MS = 1500;
 let lastSaved = null; // { challengeId, date, at } | null
 let savedHideTimer = null;
 
+// Re-renders the screen for `ctx` — but only if that's genuinely still the
+// screen on display: the challenge/date match `current` (an async save or
+// rejection resolving after the user has navigated elsewhere shouldn't yank
+// them back or rebuild a now-unrelated screen), and `current.root` is still
+// attached to the document (app.js swaps in a brand-new container on every
+// real route render; a stale `current` whose container has already been
+// replaced/detached must not be re-rendered into thin air).
+function rerenderIfCurrent(ctx) {
+  if (current && current.challengeId === ctx.challengeId && current.date === ctx.date && current.root?.isConnected) {
+    current.rerender();
+  }
+}
+
 function markSaved(ctx) {
+  // A slow save for a screen the user has since left must not touch (or
+  // reset the hide-timer for) whatever screen they're looking at now.
+  if (!current || current.challengeId !== ctx.challengeId || current.date !== ctx.date) return;
   lastSaved = { challengeId: ctx.challengeId, date: ctx.date, at: Date.now() };
   if (savedHideTimer) clearTimeout(savedHideTimer);
   savedHideTimer = setTimeout(() => {
     savedHideTimer = null;
-    if (current && current.challengeId === ctx.challengeId && current.date === ctx.date) current.rerender();
+    rerenderIfCurrent(ctx);
   }, SAVED_INDICATOR_MS);
 }
 
 // Shared by the "‹ Back" button and the "Done" button on an editable Day
 // detail screen: return to wherever the user came from, falling back to the
-// calendar when there's nowhere in this tab's history to go back to (e.g.
-// the day was opened via a direct link).
+// calendar when there's nowhere in *this app* to go back to. `history.length`
+// alone isn't a reliable signal for that — a deep link opened in an
+// already-used browser tab still has history entries, just none of them are
+// this app — so this relies on navigatedInApp instead (see above).
 function goBack() {
-  if (history.length > 1) history.back();
+  if (navigatedInApp) history.back();
   else location.hash = '#/calendar';
 }
 
@@ -173,11 +200,11 @@ function stepSummaryHtml(step, entry) {
 // fieldContext) instead of a shared module variable that a later render
 // (of a different challenge/day) would have already overwritten by the
 // time an in-flight async action — e.g. the photo picker — resolves.
-function photoRowHtml(step, entry, fieldCtx, errorMessage, isSaving) {
+function photoRowHtml(step, entry, fieldCtx, isSaving) {
   const disabledAttr = isSaving ? ' disabled' : '';
   const takeLabel = isSaving ? 'Saving…' : 'Take photo';
   const libraryLabel = isSaving ? 'Saving…' : 'Library';
-  const rowHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <div class="btn-pair">
       <button type="button" class="btn btn-primary photo-field-btn" data-role="camera-btn" data-step-id="${esc(step.id)}"${disabledAttr}>${esc(takeLabel)}</button>
       <label class="btn btn-secondary photo-field-btn">${esc(libraryLabel)}
@@ -185,8 +212,6 @@ function photoRowHtml(step, entry, fieldCtx, errorMessage, isSaving) {
       </label>
     </div>
   </div>`;
-  const footerHtml = errorMessage ? `<div class="section-footer photo-error">${esc(errorMessage)}</div>` : '';
-  return rowHtml + footerHtml;
 }
 
 function numberRowHtml(step, entry, fieldCtx) {
@@ -208,14 +233,16 @@ function noteRowHtml(step, entry, fieldCtx) {
 
 function expandedRowsHtml(step, entry, fieldCtx) {
   let html = '';
+  const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
   if (step.photo !== 'none') {
-    const photoKey = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
-    const errorMessage = photoErrorByKey.get(photoKey);
-    const isSaving = savingByKey.has(photoKey);
-    html += photoRowHtml(step, entry, fieldCtx, errorMessage, isSaving);
+    html += photoRowHtml(step, entry, fieldCtx, savingByKey.has(key));
   }
   if (step.number) html += numberRowHtml(step, entry, fieldCtx);
   if (step.note !== 'none') html += noteRowHtml(step, entry, fieldCtx);
+  // One error slot per step, regardless of which field on it failed to
+  // save — shown once, after all of the step's expanded fields.
+  const errorMessage = photoErrorByKey.get(key);
+  if (errorMessage) html += `<div class="section-footer photo-error">${esc(errorMessage)}</div>`;
   return html;
 }
 
@@ -338,24 +365,18 @@ function restoreFocus(root, challengeId, date) {
 async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
   if (!file) return;
   const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
-  // Only re-render if this row is still the one on screen — a save/rejection
-  // that resolves after the user has navigated elsewhere shouldn't yank them
-  // back or re-render a now-unrelated screen.
-  const rerenderIfCurrent = () => {
-    if (current && current.challengeId === ctx.challengeId && current.date === ctx.date) current.rerender();
-  };
   try {
     if (!fromCamera) {
       const photoDate = await photoDateOf(file);
       if (photoDate !== ctx.date) {
         photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
-        rerenderIfCurrent();
+        rerenderIfCurrent(ctx);
         return;
       }
     }
     photoErrorByKey.delete(key);
     savingByKey.set(key, true);
-    rerenderIfCurrent(); // show "Saving…" right away, before the (possibly slow) resize/write below
+    rerenderIfCurrent(ctx); // show "Saving…" right away, before the (possibly slow) resize/write below
     const photoId = await savePhoto(file);
     await store.updateStep(ctx.challengeId, ctx.date, stepId, { photoId });
     // Cleared before markSaved's (or store.updateStep's own, deferred)
@@ -373,7 +394,7 @@ async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
     // after would leave a stuck "Saving…" row next to the error message.
     savingByKey.delete(key);
     photoErrorByKey.set(key, messageForPhotoError(err));
-    rerenderIfCurrent();
+    rerenderIfCurrent(ctx);
   }
 }
 
@@ -392,6 +413,16 @@ function findPhotoInput(root, ctx, stepId) {
 
 // ---------- delegated event wiring (attached once per root) ----------
 
+// Shared by the pointerdown fast-path and the click fallback below.
+function navigateBackOrDone(isDone) {
+  // Today has nowhere to "go back" to that makes sense — Calendar is the
+  // natural place to land after finishing today's steps. Day detail (only
+  // editable for yesterday) uses the same "back to wherever this was opened
+  // from" behaviour as the back button.
+  if (isDone && !location.hash.startsWith('#/day/')) location.hash = '#/calendar';
+  else goBack();
+}
+
 function wireDelegation(root) {
   if (root.__todayWired) return;
   root.__todayWired = true;
@@ -399,6 +430,29 @@ function wireDelegation(root) {
   root.addEventListener('focusin', rememberFocus);
   root.addEventListener('input', trackFocusValue);
   root.addEventListener('focusout', forgetFocusIfLeft);
+
+  // "‹ Back"/"Done" navigate on pointerdown, not click: editing a note or
+  // number blurs it first (mousedown moves focus before click fires), whose
+  // `change` handler awaits store.updateStep -> notify() -> a rAF re-render
+  // that can replace the button between mousedown and mouseup — the browser
+  // then has no element to fire `click` on, and the tap is silently lost.
+  // Acting on pointerdown beats that re-render every time. `pointerHandled`
+  // then suppresses the `click` that (usually) still follows, so activation
+  // doesn't fire twice; a `click` with no preceding pointerdown (keyboard
+  // Enter/Space) still works normally. The pending field save itself is
+  // unaffected either way: its handler already reads challenge/date/step off
+  // the DOM via fieldContext, not off the screen that's about to disappear.
+  let pointerHandled = false;
+
+  root.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const backBtn = e.target.closest('[data-role="back"]');
+    const doneBtn = e.target.closest('[data-role="done"]');
+    if (!backBtn && !doneBtn) return;
+    pointerHandled = true;
+    setTimeout(() => { pointerHandled = false; }, 0); // self-heals if click never follows (e.g. drag-off)
+    navigateBackOrDone(!!doneBtn);
+  });
 
   root.addEventListener('click', (e) => {
     const switchBtn = e.target.closest('[data-role="switch-challenge"]');
@@ -408,17 +462,14 @@ function wireDelegation(root) {
     }
     const backBtn = e.target.closest('[data-role="back"]');
     if (backBtn) {
+      if (pointerHandled) { pointerHandled = false; return; }
       goBack();
       return;
     }
     const doneBtn = e.target.closest('[data-role="done"]');
     if (doneBtn) {
-      // Today has nowhere to "go back" to that makes sense — Calendar is the
-      // natural place to land after finishing today's steps. Day detail
-      // (only editable for yesterday) uses the same "back to wherever this
-      // was opened from" behaviour as the back button.
-      if (location.hash.startsWith('#/day/')) goBack();
-      else location.hash = '#/calendar';
+      if (pointerHandled) { pointerHandled = false; return; }
+      navigateBackOrDone(true);
       return;
     }
     const summaryBtn = e.target.closest('[data-role="view-summary"]');
@@ -454,8 +505,16 @@ function wireDelegation(root) {
       const ctx = fieldContext(check);
       if (!ctx) return;
       const stepId = check.closest('[data-role="step-row"]').dataset.stepId;
-      await store.updateStep(ctx.challengeId, ctx.date, stepId, { done: check.checked });
-      markSaved(ctx);
+      const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+      try {
+        await store.updateStep(ctx.challengeId, ctx.date, stepId, { done: check.checked });
+        photoErrorByKey.delete(key);
+        markSaved(ctx);
+      } catch (err) {
+        console.error('Save failed:', err);
+        photoErrorByKey.set(key, "Couldn't save. Please try again.");
+        rerenderIfCurrent(ctx);
+      }
       return;
     }
 
@@ -464,17 +523,25 @@ function wireDelegation(root) {
       const ctx = fieldContext(numberInput);
       if (!ctx) return;
       const stepId = numberInput.dataset.stepId;
+      const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
       const raw = numberInput.value;
       const matchesFocusRecord = () =>
         focusRecord && focusRecord.role === 'number' && focusRecord.stepId === stepId &&
         focusRecord.challengeId === ctx.challengeId && focusRecord.date === ctx.date;
       if (raw.trim() === '') {
         numberInput.classList.remove('invalid');
-        await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: undefined });
-        markSaved(ctx);
-        // Field still owns the record: nothing typed left to write back over
-        // the now-cleared stored value on the next re-render.
-        if (matchesFocusRecord()) focusRecord.value = '';
+        try {
+          await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: undefined });
+          photoErrorByKey.delete(key);
+          markSaved(ctx);
+          // Field still owns the record: nothing typed left to write back
+          // over the now-cleared stored value on the next re-render.
+          if (matchesFocusRecord()) focusRecord.value = '';
+        } catch (err) {
+          console.error('Save failed:', err);
+          photoErrorByKey.set(key, "Couldn't save. Please try again.");
+          rerenderIfCurrent(ctx);
+        }
         return;
       }
       const parsed = parseNumberInput(raw);
@@ -483,12 +550,19 @@ function wireDelegation(root) {
         return;
       }
       numberInput.classList.remove('invalid');
-      await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: parsed });
-      markSaved(ctx);
-      // Normalise the tracked value to what was actually stored (e.g. "3,5"
-      // -> "3.5") so restoreFocus doesn't write the raw comma form back over
-      // it on the next store-driven re-render.
-      if (matchesFocusRecord()) focusRecord.value = String(parsed);
+      try {
+        await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: parsed });
+        photoErrorByKey.delete(key);
+        markSaved(ctx);
+        // Normalise the tracked value to what was actually stored (e.g.
+        // "3,5" -> "3.5") so restoreFocus doesn't write the raw comma form
+        // back over it on the next store-driven re-render.
+        if (matchesFocusRecord()) focusRecord.value = String(parsed);
+      } catch (err) {
+        console.error('Save failed:', err);
+        photoErrorByKey.set(key, "Couldn't save. Please try again.");
+        rerenderIfCurrent(ctx);
+      }
       return;
     }
 
@@ -497,8 +571,16 @@ function wireDelegation(root) {
       const ctx = fieldContext(noteInput);
       if (!ctx) return;
       const stepId = noteInput.dataset.stepId;
-      await store.updateStep(ctx.challengeId, ctx.date, stepId, { note: noteInput.value });
-      markSaved(ctx);
+      const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+      try {
+        await store.updateStep(ctx.challengeId, ctx.date, stepId, { note: noteInput.value });
+        photoErrorByKey.delete(key);
+        markSaved(ctx);
+      } catch (err) {
+        console.error('Save failed:', err);
+        photoErrorByKey.set(key, "Couldn't save. Please try again.");
+        rerenderIfCurrent(ctx);
+      }
       return;
     }
 
@@ -551,6 +633,7 @@ async function renderScreen(root, { date, dayRoute }) {
     challengeId: challenge.id,
     date,
     editable,
+    root,
     rerender: () => renderScreen(root, { date, dayRoute }),
   };
 
