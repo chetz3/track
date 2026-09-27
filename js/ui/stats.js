@@ -18,14 +18,22 @@
 // on every scroll.
 
 import * as store from '../store.js';
-import { esc } from './dom.js';
+import { esc, hydratePhotos } from './dom.js';
 import { collectNumberSeries, trendDomain, ringStats } from '../chartMath.js';
+import { buildPhotoProgress } from '../summaryModel.js';
 
 // ---------- resize handling (module-level, registered once) ----------
 
 let currentRoot = null;
 let lastRenderedWidth = null;
 let resizeTimer = null;
+
+// ---------- photo progress selections (module-level so re-renders, e.g. on
+// every store change, keep whatever the person picked; reset to defaults in
+// photoProgressHtml if the stored id no longer exists on this challenge) ----------
+
+let selectedPhotoStepId = null;
+let selectedNumberStepId = null; // step id, or 'none'
 
 function scheduleResizeRerender() {
   if (resizeTimer) clearTimeout(resizeTimer);
@@ -41,9 +49,110 @@ function scheduleResizeRerender() {
 
 window.addEventListener('resize', scheduleResizeRerender);
 
+// ---------- photo progress (gallery) ----------
+
+// Rounds away float noise (e.g. 80 - 78.4) before display.
+function roundClean(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function fmtValue(value, unit) {
+  return unit ? `${value} ${unit}` : `${value}`;
+}
+
+function fmtDiff(diff, unit) {
+  const sign = diff > 0 ? '+' : diff < 0 ? '−' : '';
+  return fmtValue(`${sign}${Math.abs(roundClean(diff))}`, unit);
+}
+
+function photoTileHtml(tile) {
+  const caption = typeof tile.value === 'number'
+    ? `Day ${tile.dayNumber} · ${esc(fmtValue(tile.value, tile.unit))}`
+    : `Day ${tile.dayNumber}`;
+  return `<button type="button" class="photo-progress-tile" data-role="photo-tile" data-date="${esc(tile.date)}">
+    <img data-photo-id="${esc(tile.photoId)}" alt="Day ${esc(tile.dayNumber)}" />
+    <span class="photo-progress-caption">${caption}</span>
+  </button>`;
+}
+
+// Returns '' (section omitted entirely) when the challenge has no
+// photo-enabled step.
+function photoProgressHtml(challenge, attempt, daysMap) {
+  const photoSteps = challenge.steps.filter((s) => s.photo && s.photo !== 'none');
+  if (!photoSteps.length) return '';
+
+  if (!photoSteps.some((s) => s.id === selectedPhotoStepId)) selectedPhotoStepId = photoSteps[0].id;
+
+  const numberSteps = challenge.steps.filter((s) => s.number);
+  if (numberSteps.length) {
+    if (selectedNumberStepId !== 'none' && !numberSteps.some((s) => s.id === selectedNumberStepId)) {
+      selectedNumberStepId = numberSteps[0].id;
+    }
+  } else {
+    selectedNumberStepId = 'none';
+  }
+
+  const numberStepId = selectedNumberStepId === 'none' ? null : selectedNumberStepId;
+  const { tiles, change } = buildPhotoProgress(challenge, daysMap, attempt, selectedPhotoStepId, numberStepId);
+
+  const photoOptionsHtml = photoSteps
+    .map((s) => `<option value="${esc(s.id)}"${s.id === selectedPhotoStepId ? ' selected' : ''}>${esc(s.name)}</option>`)
+    .join('');
+  const numberOptionsHtml = `<option value="none"${selectedNumberStepId === 'none' ? ' selected' : ''}>None</option>` +
+    numberSteps.map((s) => `<option value="${esc(s.id)}"${s.id === selectedNumberStepId ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+
+  const changeHtml = change
+    ? `<p class="section-footer photo-progress-change">First ${esc(fmtValue(change.first, change.unit))} → Latest ${esc(fmtValue(change.latest, change.unit))} (${esc(fmtDiff(change.diff, change.unit))})</p>`
+    : '';
+
+  const gridHtml = tiles.length
+    ? `<div class="photo-progress-grid">${tiles.map(photoTileHtml).join('')}</div>`
+    : `<p class="section-footer">No photos yet.</p>`;
+
+  return `
+    <div class="section">
+      <div class="photo-progress-head">
+        <p class="section-header">Photo progress</p>
+        <div class="photo-progress-selects">
+          <label class="photo-progress-select-label">Photo
+            <select class="photo-progress-select" data-role="photo-step-select">${photoOptionsHtml}</select>
+          </label>
+          <label class="photo-progress-select-label">Show
+            <select class="photo-progress-select" data-role="number-step-select">${numberOptionsHtml}</select>
+          </label>
+        </div>
+      </div>
+      ${changeHtml}
+      ${gridHtml}
+    </div>
+  `;
+}
+
+function wirePhotoProgress(root) {
+  const photoSelect = root.querySelector('[data-role="photo-step-select"]');
+  if (photoSelect) {
+    photoSelect.addEventListener('change', (e) => {
+      selectedPhotoStepId = e.target.value;
+      renderStats(root);
+    });
+  }
+  const numberSelect = root.querySelector('[data-role="number-step-select"]');
+  if (numberSelect) {
+    numberSelect.addEventListener('change', (e) => {
+      selectedNumberStepId = e.target.value;
+      renderStats(root);
+    });
+  }
+  root.querySelectorAll('[data-role="photo-tile"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      location.hash = '#/summary/' + btn.dataset.date;
+    });
+  });
+}
+
 // ---------- main screen ----------
 
-export function renderStats(root) {
+export async function renderStats(root) {
   currentRoot = root;
   lastRenderedWidth = root.clientWidth;
 
@@ -77,6 +186,7 @@ export function renderStats(root) {
   const stats = ringStats(challenge, evaluation, attempt, store.today());
   const daysMap = store.state.days[challenge.id] || {};
   const series = collectNumberSeries(challenge, daysMap);
+  const photoProgress = photoProgressHtml(challenge, attempt, daysMap);
 
   const seriesHtml = series.length
     ? series.map((s, i) => {
@@ -113,6 +223,7 @@ export function renderStats(root) {
         </div>
       </div>
     </div>
+    ${photoProgress}
     ${seriesHtml}
   `;
 
@@ -123,6 +234,9 @@ export function renderStats(root) {
     const mount = root.querySelector(`[data-trend-index="${i}"]`);
     if (mount) renderTrendChart(mount, { title: s.step.name, unit: s.step.number.unit, points: s.points });
   }
+
+  wirePhotoProgress(root);
+  await hydratePhotos(root);
 }
 
 // ---------- progress ring ----------

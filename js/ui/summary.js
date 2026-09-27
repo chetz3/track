@@ -111,8 +111,21 @@ function itemHtml(item) {
   </div>`;
 }
 
-function panelHtml(date, status, items) {
+function photoNavHtml(photos) {
+  if (photos.length <= 1) return '';
+  return `<div class="summary-photo-nav" data-role="photo-nav">
+    <div class="summary-photo-nav-row">
+      <button type="button" class="summary-nav-btn" data-role="prev" aria-label="Previous photo">‹</button>
+      <span class="summary-photo-counter" data-role="photo-counter">1 / ${photos.length}</span>
+      <button type="button" class="summary-nav-btn" data-role="next" aria-label="Next photo">›</button>
+    </div>
+    <div class="summary-photo-name" data-role="photo-name">${esc(photos[0].stepName)}</div>
+  </div>`;
+}
+
+function panelHtml(date, status, items, photos) {
   return `<div class="summary-panel">
+    ${photoNavHtml(photos)}
     <div class="summary-panel-date">${esc(formatDateShort(date))}</div>
     <span class="pill ${status}">${esc(STATUS_LABELS[status] || status)}</span>
     <div class="summary-items">${items.map(itemHtml).join('')}</div>
@@ -137,19 +150,45 @@ function closeViewer() {
   }
 }
 
-function wireStrip(root, photoCount) {
-  if (photoCount <= 1) return;
-  const strip = root.querySelector('[data-role="photos-strip"]');
+// Index of the slide currently centred in the strip, derived from its
+// scroll position rather than tracked separately, so swipe and the
+// prev/next buttons never fall out of sync with each other.
+function currentSlideIndex(strip, photoCount) {
+  const raw = Math.round(strip.scrollLeft / (strip.clientWidth || 1));
+  return Math.min(photoCount - 1, Math.max(0, raw));
+}
+
+// Updates the dots, counter and step name for slide `idx`. Called both from
+// the strip's scroll listener (swipe) and after a prev/next click.
+function updateNavUi(root, photos, idx) {
   const dotsWrap = root.querySelector('[data-role="dots"]');
-  if (!strip || !dotsWrap) return;
+  if (dotsWrap) dotsWrap.querySelectorAll('.summary-dot').forEach((d, i) => d.classList.toggle('active', i === idx));
+  const counterEl = root.querySelector('[data-role="photo-counter"]');
+  if (counterEl) counterEl.textContent = `${idx + 1} / ${photos.length}`;
+  const nameEl = root.querySelector('[data-role="photo-name"]');
+  if (nameEl) nameEl.textContent = photos[idx].stepName;
+}
+
+function wireStrip(root, photos) {
+  if (photos.length <= 1) return;
+  const strip = root.querySelector('[data-role="photos-strip"]');
+  if (!strip) return;
   strip.addEventListener('scroll', () => {
-    const raw = Math.round(strip.scrollLeft / (strip.clientWidth || 1));
-    const idx = Math.min(photoCount - 1, Math.max(0, raw));
-    dotsWrap.querySelectorAll('.summary-dot').forEach((d, i) => d.classList.toggle('active', i === idx));
+    updateNavUi(root, photos, currentSlideIndex(strip, photos.length));
   }, { passive: true });
 }
 
-function wireControls(root, date) {
+// Scrolls the strip to the previous/next slide (dir = -1/+1), wrapping
+// around at either end.
+function goToSlide(root, photos, dir) {
+  const strip = root.querySelector('[data-role="photos-strip"]');
+  if (!strip || photos.length <= 1) return;
+  const idx = currentSlideIndex(strip, photos.length);
+  const next = ((idx + dir) % photos.length + photos.length) % photos.length;
+  strip.scrollTo({ left: next * strip.clientWidth, behavior: 'smooth' });
+}
+
+function wireControls(root, date, photos) {
   if (root.__summaryWired) return;
   root.__summaryWired = true;
   root.addEventListener('click', (e) => {
@@ -159,6 +198,14 @@ function wireControls(root, date) {
     }
     if (e.target.closest('[data-role="edit"]')) {
       location.hash = `#/day/${date}`;
+      return;
+    }
+    if (e.target.closest('[data-role="prev"]')) {
+      goToSlide(root, photos, -1);
+      return;
+    }
+    if (e.target.closest('[data-role="next"]')) {
+      goToSlide(root, photos, 1);
     }
   });
 }
@@ -172,7 +219,7 @@ export async function renderSummary(root, dateParam) {
     // the close button rather than stranding the user on a blank,
     // tab-bar-less screen.
     root.innerHTML = `<div class="summary-viewer">${controlsHtml(false)}</div>`;
-    wireControls(root.querySelector('.summary-viewer'), null);
+    wireControls(root.querySelector('.summary-viewer'), null, []);
     attachEscHandler();
     return;
   }
@@ -187,12 +234,12 @@ export async function renderSummary(root, dateParam) {
   root.innerHTML = `<div class="summary-viewer">
     ${photosHtml(summary.photos)}
     ${controlsHtml(showEdit)}
-    ${panelHtml(date, status, summary.items)}
+    ${panelHtml(date, status, summary.items, summary.photos)}
   </div>`;
 
   const viewer = root.querySelector('.summary-viewer');
-  wireStrip(viewer, summary.photos.length);
-  wireControls(viewer, date);
+  wireStrip(viewer, summary.photos);
+  wireControls(viewer, date, summary.photos);
   attachEscHandler();
   await hydratePhotos(root);
 }
