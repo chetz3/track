@@ -64,7 +64,21 @@ function makePhotoId() {
 }
 
 export async function savePhoto(file) {
-  const blob = await resizeImage(file);
+  let blob;
+  try {
+    blob = await resizeImage(file);
+  } catch (err) {
+    // resizeImage fails for images the browser's <img>/canvas pipeline can't
+    // handle (HEIC on desktop Chrome/Firefox, a corrupt file) even though the
+    // file itself is a perfectly good photo — store it as-is rather than
+    // losing the upload outright.
+    const isImage = file.type === '' || file.type.startsWith('image/');
+    if (isImage && file.size <= 15 * 1024 * 1024) {
+      blob = file;
+    } else {
+      throw err;
+    }
+  }
   const id = makePhotoId();
   await put('photos', { id, blob, createdAt: Date.now() });
   return id;

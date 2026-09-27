@@ -7,9 +7,8 @@
 
 import * as store from '../store.js';
 import { dayStatus, isEditable, isStepComplete, parseNumberInput, addDays, diffDays } from '../rules.js';
-import { savePhoto, photoDateOf, deletePhoto } from '../photos.js';
-import { esc, formatDateLong, formatDateShort, hydratePhotos, readFileAsPhoto } from './dom.js';
-import { openCamera } from './camera.js';
+import { savePhoto, deletePhoto } from '../photos.js';
+import { esc, formatDateLong, hydratePhotos, readFileAsPhoto } from './dom.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -215,15 +214,11 @@ function stepSummaryHtml(step, entry) {
 // time an in-flight async action — e.g. the photo picker — resolves.
 function photoRowHtml(step, entry, fieldCtx, isSaving) {
   const disabledAttr = isSaving ? ' disabled' : '';
-  const takeLabel = isSaving ? 'Saving…' : 'Take photo';
-  const libraryLabel = isSaving ? 'Saving…' : 'Library';
+  const label = isSaving ? 'Saving…' : entry.photoId ? 'Change photo' : 'Add photo';
   return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <div class="btn-pair">
-      <button type="button" class="btn btn-primary photo-field-btn" data-role="camera-btn" data-step-id="${esc(step.id)}"${disabledAttr}>${esc(takeLabel)}</button>
-      <label class="btn btn-secondary photo-field-btn">${esc(libraryLabel)}
-        <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}"${disabledAttr} />
-      </label>
-    </div>
+    <label class="btn btn-primary photo-field-btn" style="width:100%">${esc(label)}
+      <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}"${disabledAttr} />
+    </label>
   </div>`;
 }
 
@@ -410,31 +405,17 @@ function restoreFocus(root, challengeId, date) {
   el.focus({ preventScroll: true });
 }
 
-// ---------- photo save (shared by the camera and the library picker) ----------
+// ---------- photo save (library picker) ----------
 
-// Both photo paths — the in-app camera and the library file input — funnel
-// through here so the "must match the day being logged" rule applies
-// identically. `ctx`/`stepId` are read off the DOM at the moment the user
-// acted (see fieldContext), not off the shared `current` box, so a photo
-// that resolves after the user has navigated away still saves (or is
-// rejected) against the row it was opened for.
-// `fromCamera` skips the day-match check: the spec's "must match the day
-// being logged" rule targets the library picker (any photo could be handed
-// to it), not a photo the in-app camera just took — which is also the only
-// way to log yesterday's photo at all, since a camera shot's Exif/lastModified
-// date is always "now".
-async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
+// The library file input funnels through here. `ctx`/`stepId` are read off
+// the DOM at the moment the user acted (see fieldContext), not off the
+// shared `current` box, so a photo that resolves after the user has
+// navigated away still saves (or is rejected) against the row it was opened
+// for.
+async function handlePhotoFile(ctx, stepId, file) {
   if (!file) return;
   const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
   try {
-    if (!fromCamera) {
-      const photoDate = await photoDateOf(file);
-      if (photoDate !== ctx.date) {
-        photoErrorByKey.set(key, `This photo is from ${formatDateShort(photoDate)}. Pick one taken on ${formatDateShort(ctx.date)}, or take a new one.`);
-        rerenderIfCurrent(ctx);
-        return;
-      }
-    }
     photoErrorByKey.delete(key);
     savingByKey.set(key, true);
     rerenderIfCurrent(ctx); // show "Saving…" right away, before the (possibly slow) resize/write below
@@ -466,19 +447,6 @@ async function handlePhotoFile(ctx, stepId, file, { fromCamera = false } = {}) {
     photoErrorByKey.set(key, messageForPhotoError(err));
     rerenderIfCurrent(ctx);
   }
-}
-
-// Re-queries the library input for (ctx, stepId) against the *live* root at
-// the moment it's needed, rather than a row element captured back when the
-// camera button was clicked — the camera sheet can stay open across a
-// store-driven re-render that replaces that row entirely. Returns null (do
-// nothing) if the row/input no longer exists, e.g. the step got collapsed or
-// the user navigated to a different challenge/day while the sheet was open.
-function findPhotoInput(root, ctx, stepId) {
-  const cssEscape = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape : (s) => s;
-  return root.querySelector(
-    `[data-challenge-id="${cssEscape(ctx.challengeId)}"][data-date="${cssEscape(ctx.date)}"] [data-role="photo-input"][data-step-id="${cssEscape(stepId)}"]`
-  );
 }
 
 // ---------- delegated event wiring (attached once per root) ----------
@@ -569,17 +537,6 @@ function wireDelegation(root) {
       expandedStepId = expandedStepId === stepId ? null : stepId;
       current?.rerender();
       return;
-    }
-
-    const cameraBtn = e.target.closest('[data-role="camera-btn"]');
-    if (cameraBtn) {
-      const ctx = fieldContext(cameraBtn);
-      if (!ctx) return;
-      const stepId = cameraBtn.dataset.stepId;
-      openCamera({
-        onCapture: (file) => { handlePhotoFile(ctx, stepId, file, { fromCamera: true }); },
-        onUseLibrary: () => { findPhotoInput(root, ctx, stepId)?.click(); },
-      });
     }
   });
 
