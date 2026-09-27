@@ -237,6 +237,14 @@ function renderBootError(err) {
 
 async function boot() {
   try {
+    if (new URLSearchParams(location.search).has('mock')) {
+      const mock = await import('./dev/mock.js');
+      if (mock.isDevHost()) {
+        await mock.seedMock(store.today());
+        localStorage.setItem('tracker:selected', 'c-mock');
+        history.replaceState(null, '', location.pathname + '#/calendar');
+      }
+    }
     await store.loadAll();
     try {
       await navigator.storage?.persist?.();
