@@ -2,8 +2,6 @@
 // No DOM access, no IndexedDB — everything here takes plain data in and
 // returns plain data out, so it can be unit tested with Node's test runner.
 
-export const BODY_STEP_ID = 'body';
-
 function parseLocalDate(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(y, m - 1, d);
@@ -35,27 +33,63 @@ export function isEditable(date, today) {
   return date === today || date === addDays(today, -1);
 }
 
-// A day is green when every mandatory step recorded in its snapshot
-// (day.mandatoryStepIds) is complete. Optional steps never affect colour.
-export function isDayGreen(day, config) {
-  if (!day || !Array.isArray(day.mandatoryStepIds)) return false;
-  for (const id of day.mandatoryStepIds) {
-    if (id === BODY_STEP_ID) {
-      const hasWeight = day.weight !== undefined && day.weight !== null && day.weight !== '';
-      if (!hasWeight || !day.bodyPhotoId) return false;
-    } else {
-      const entry = day.steps && day.steps[id];
-      if (!entry || !entry.done) return false;
-      const stepDef = config && config.steps && config.steps.find((s) => s.id === id);
-      if (stepDef && stepDef.requiresPhoto && !entry.photoId) return false;
-    }
-  }
+export function isNumberValue(v) {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+// Matches a plain decimal: optional leading '-', digits (or none before a
+// leading '.'), and an optional '.'/',' followed by digits — e.g. '78.4',
+// '-2.5', '.5'. Deliberately excludes hex ('0x10') and exponent ('1e999')
+// forms that `Number(...)` would otherwise happily parse.
+const PLAIN_DECIMAL_RE = /^-?(\d+([.,]\d+)?|\.\d+)$/;
+// A comma followed by exactly three digits and nothing else is ambiguous
+// (European decimal '12,345' meaning 12.345 vs. a thousands separator
+// meaning 12345) — reject rather than guess.
+const THOUSANDS_RE = /^-?\d{1,3}(,\d{3})+$/;
+
+export function parseNumberInput(str) {
+  const t = String(str ?? '').trim();
+  if (t === '') return undefined;
+  if (THOUSANDS_RE.test(t)) return undefined;
+  if (!PLAIN_DECIMAL_RE.test(t)) return undefined;
+  const n = Number(t.replace(',', '.'));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export function requiredFieldsFilled(stepDef, entry) {
+  if (!stepDef || !entry) return false;
+  const needsPhoto = stepDef.photo === 'required';
+  const needsNumber = !!(stepDef.number && stepDef.number.required);
+  if (!needsPhoto && !needsNumber) return false;
+  if (needsPhoto && !entry.photoId) return false;
+  if (needsNumber && !isNumberValue(entry.value)) return false;
   return true;
 }
 
-export function dayStatus(date, day, config, today) {
+export function isStepComplete(stepDef, entry) {
+  if (!entry || !entry.done) return false;
+  if (!stepDef) return true;
+  if (stepDef.photo === 'required' && !entry.photoId) return false;
+  if (stepDef.number && stepDef.number.required && !isNumberValue(entry.value)) return false;
+  return true;
+}
+
+export function mandatorySnapshot(challenge) {
+  return challenge.steps.filter((s) => s.mandatory).map((s) => s.id);
+}
+
+// A day is green when every mandatory step recorded in its snapshot
+// (day.mandatoryStepIds) is complete. Optional steps never affect colour.
+export function isDayGreen(day, challenge) {
+  if (!day || !Array.isArray(day.mandatoryStepIds)) return false;
+  const steps = day.steps || {};
+  return day.mandatoryStepIds.every((id) =>
+    isStepComplete(challenge.steps.find((s) => s.id === id), steps[id]));
+}
+
+export function dayStatus(date, day, challenge, today) {
   if (date > today) return 'future';
-  if (isDayGreen(day, config)) return 'green';
+  if (isDayGreen(day, challenge)) return 'green';
   if (isEditable(date, today)) return 'pending';
   return 'red';
 }
@@ -83,8 +117,8 @@ export function weekStatus(dayStatuses, weeklyTarget) {
 // finalised green. Those weeks are frozen — always reported green,
 // without being re-scored — so raising weeklyTarget/totalDays later can't
 // retroactively fail a week that already passed under the old settings.
-export function evaluateAttempt(config, attempt, daysMap, today) {
-  const { totalDays, weeklyTarget } = config;
+export function evaluateAttempt(challenge, attempt, daysMap, today) {
+  const { totalDays, weeklyTarget } = challenge;
   const startDate = attempt.startDate;
   const frozenWeeks = attempt.greenWeeks || 0;
   const weeks = [];
@@ -100,7 +134,7 @@ export function evaluateAttempt(config, attempt, daysMap, today) {
     for (let i = 0; i < 7 && dayNumber <= totalDays; i++, dayNumber++) {
       const date = addDays(startDate, dayNumber - 1);
       const day = daysMap[date];
-      weekDayStatuses.push(dayStatus(date, day, config, today));
+      weekDayStatuses.push(dayStatus(date, day, challenge, today));
       weekEndDate = date;
     }
     const status = weekIndex < frozenWeeks ? 'green' : weekStatus(weekDayStatuses, weeklyTarget);

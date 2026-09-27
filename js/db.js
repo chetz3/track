@@ -1,16 +1,38 @@
 // Thin promise wrapper over IndexedDB. No rules/business logic here.
 
+import { migrateV1 } from './migrate.js';
+
 const DB_NAME = 'tracker';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const STORES = ['challenges', 'attempts', 'days', 'photos'];
 
-export const CONFIG_KEY = 'main';
+function createDaysStore(db) {
+  const s = db.createObjectStore('days', { keyPath: 'key' });
+  s.createIndex('challengeId', 'challengeId');
+}
 
-const STORE_KEYPATHS = {
-  config: 'id',
-  attempts: 'id',
-  days: 'date',
-  photos: 'id',
-};
+// Runs inside the versionchange transaction. Uses callbacks (not promises)
+// so the transaction can't auto-commit between reads.
+function migrateFromV1(db, tx) {
+  tx.objectStore('config').get('main').onsuccess = (e1) => {
+    const config = e1.target.result;
+    tx.objectStore('attempts').getAll().onsuccess = (e2) => {
+      const attempts = e2.target.result;
+      tx.objectStore('days').getAll().onsuccess = (e3) => {
+        const out = migrateV1({ config, attempts, days: e3.target.result });
+        db.deleteObjectStore('days');
+        createDaysStore(db);
+        db.deleteObjectStore('config');
+        const ch = tx.objectStore('challenges');
+        const at = tx.objectStore('attempts');
+        const ds = tx.objectStore('days');
+        out.challenges.forEach((c) => ch.put(c));
+        out.attempts.forEach((a) => at.put(a));
+        out.days.forEach((d) => ds.put(d));
+      };
+    };
+  };
+}
 
 let dbPromise = null;
 
@@ -18,16 +40,27 @@ function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
-      for (const [name, keyPath] of Object.entries(STORE_KEYPATHS)) {
-        if (!db.objectStoreNames.contains(name)) {
-          db.createObjectStore(name, { keyPath });
-        }
-      }
+      const tx = req.transaction;
+      if (!db.objectStoreNames.contains('photos')) db.createObjectStore('photos', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('challenges')) db.createObjectStore('challenges', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('attempts')) db.createObjectStore('attempts', { keyPath: 'id' });
+      const attempts = tx.objectStore('attempts');
+      if (!attempts.indexNames.contains('challengeId')) attempts.createIndex('challengeId', 'challengeId');
+      if (event.oldVersion === 1) migrateFromV1(db, tx);
+      else if (!db.objectStoreNames.contains('days')) createDaysStore(db);
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const idb = req.result;
+      // Another tab upgrading the schema (or a same-tab reload racing this
+      // one) fires versionchange here; closing lets that other open()
+      // proceed instead of onblocked-ing it forever.
+      idb.onversionchange = () => idb.close();
+      resolve(idb);
+    };
+    req.onerror = () => { dbPromise = null; reject(req.error); };
+    req.onblocked = () => { dbPromise = null; reject(new Error('Close other tabs of this app and reload.')); };
   });
   return dbPromise;
 }
@@ -69,16 +102,57 @@ export async function clear(storeName) {
   return reqToPromise(store.clear());
 }
 
-export async function clearAll() {
-  for (const name of Object.keys(STORE_KEYPATHS)) {
-    await clear(name);
-  }
+export async function getAllByChallenge(storeName, challengeId) {
+  const db = await openDB();
+  const idx = db.transaction(storeName, 'readonly').objectStore(storeName).index('challengeId');
+  return reqToPromise(idx.getAll(challengeId));
 }
 
-export async function getConfig() {
-  return get('config', CONFIG_KEY);
+export async function putMany(entries) {
+  if (entries.length === 0) return;
+  const db = await openDB();
+  const names = [...new Set(entries.map((e) => e.store))];
+  const tx = db.transaction(names, 'readwrite');
+  for (const { store, value } of entries) tx.objectStore(store).put(value);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = (event) => reject(event.target.error);
+    tx.onabort = () => reject(tx.error || new Error('Import failed'));
+  });
 }
 
-export async function setConfig(config) {
-  return put('config', { ...config, id: CONFIG_KEY });
+// Clears all four stores and writes `entries` back in, all inside ONE
+// readwrite transaction, so a failure partway through (e.g. QuotaExceededError
+// while restoring a photo Blob) aborts the whole thing and the previous data
+// is left intact rather than the user ending up with an emptied DB.
+export async function replaceAll(entries) {
+  const db = await openDB();
+  const tx = db.transaction(STORES, 'readwrite');
+  for (const name of STORES) tx.objectStore(name).clear();
+  for (const { store, value } of entries) tx.objectStore(store).put(value);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = (event) => reject(event.target.error);
+    tx.onabort = () => reject(tx.error || new Error('Import failed'));
+  });
+}
+
+export async function deleteChallengeCascade(challengeId) {
+  const db = await openDB();
+  const tx = db.transaction(STORES, 'readwrite');
+  const days = tx.objectStore('days');
+  days.index('challengeId').getAll(challengeId).onsuccess = (e) => {
+    for (const d of e.target.result) {
+      for (const entry of Object.values(d.steps || {})) {
+        if (entry && entry.photoId) tx.objectStore('photos').delete(entry.photoId);
+      }
+      days.delete(d.key);
+    }
+  };
+  const attempts = tx.objectStore('attempts');
+  attempts.index('challengeId').getAllKeys(challengeId).onsuccess = (e) => {
+    for (const k of e.target.result) attempts.delete(k);
+  };
+  tx.objectStore('challenges').delete(challengeId);
+  return new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
 }
