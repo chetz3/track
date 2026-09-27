@@ -11,6 +11,19 @@ export function collectNumberSeries(challenge, daysMap) {
   }));
 }
 
+// Totals for a number series, per the step's Stats toggles. Returns only
+// the requested keys; `diff` is latest − first (signed).
+export function numberSummary(number, points) {
+  const out = {};
+  if (!points.length) return out;
+  const values = points.map((p) => p.value);
+  const round = (v) => Math.round(v * 100) / 100;
+  if (number.showSum) out.sum = round(values.reduce((a, b) => a + b, 0));
+  if (number.showDiff) out.diff = round(values[values.length - 1] - values[0]);
+  if (number.showAvg) out.avg = round(values.reduce((a, b) => a + b, 0) / values.length);
+  return out;
+}
+
 export function trendDomain(values) {
   if (values.length === 0) return [0, 1];
   const lo = Math.min(...values);

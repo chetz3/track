@@ -20,7 +20,7 @@ function cloneStep(step) {
     name: step.name || '',
     mandatory: !!step.mandatory,
     photo: step.photo || 'none',
-    number: step.number ? { label: step.number.label || '', unit: step.number.unit || '', required: !!step.number.required } : null,
+    number: step.number ? { label: step.number.label || '', unit: step.number.unit || '', required: !!step.number.required, showSum: !!step.number.showSum, showDiff: !!step.number.showDiff, showAvg: !!step.number.showAvg } : null,
     note: step.note === 'optional' ? 'optional' : 'none',
   };
 }
@@ -57,7 +57,10 @@ function numberSubRows(draft) {
       <span class="field-label">Unit</span>
       <input type="text" data-role="number-unit" value="${esc(draft.number.unit)}" placeholder="e.g. kg" />
     </div>
-    ${switchRow('Required', 'number-required', draft.number.required)}`;
+    ${switchRow('Required', 'number-required', draft.number.required)}
+    ${switchRow('Stats: show total', 'number-sum', draft.number.showSum)}
+    ${switchRow('Stats: show change (start → now)', 'number-diff', draft.number.showDiff)}
+    ${switchRow('Stats: show average', 'number-avg', draft.number.showAvg)}`;
 }
 
 function bodyHtml(draft, error, editing) {
@@ -119,6 +122,9 @@ export function openStepEditor(step, onSave, onDelete) {
         label: draft.number.label.trim() || 'Value',
         unit: draft.number.unit.trim(),
         required: draft.number.required,
+        showSum: draft.number.showSum,
+        showDiff: draft.number.showDiff,
+        showAvg: draft.number.showAvg,
       } : null,
       note: draft.note,
     };
@@ -143,10 +149,16 @@ export function openStepEditor(step, onSave, onDelete) {
       } else if (role === 'photo-option') {
         draft.photo = e.target.value;
       } else if (role === 'number-toggle') {
-        draft.number = e.target.checked ? { label: 'Value', unit: '', required: false } : null;
+        draft.number = e.target.checked ? { label: 'Value', unit: '', required: false, showSum: false, showDiff: false, showAvg: false } : null;
         rerender(sheetEl);
       } else if (role === 'number-required') {
         draft.number.required = e.target.checked;
+      } else if (role === 'number-sum') {
+        draft.number.showSum = e.target.checked;
+      } else if (role === 'number-diff') {
+        draft.number.showDiff = e.target.checked;
+      } else if (role === 'number-avg') {
+        draft.number.showAvg = e.target.checked;
       } else if (role === 'note-toggle') {
         draft.note = e.target.checked ? 'optional' : 'none';
       }

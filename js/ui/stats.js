@@ -19,7 +19,7 @@
 
 import * as store from '../store.js';
 import { esc, hydratePhotos } from './dom.js';
-import { collectNumberSeries, trendDomain, ringStats } from '../chartMath.js';
+import { collectNumberSeries, trendDomain, ringStats, numberSummary } from '../chartMath.js';
 import { buildPhotoProgress } from '../summaryModel.js';
 
 // ---------- resize handling (module-level, registered once) ----------
@@ -73,6 +73,18 @@ function photoTileHtml(tile) {
     <img data-photo-id="${esc(tile.photoId)}" alt="Day ${esc(tile.dayNumber)}" />
     <span class="photo-progress-caption">${caption}</span>
   </button>`;
+}
+
+// "Total 42 km · Change −2.7 kg · Average 3.5 km" under a trend's header,
+// per the step's Stats toggles; '' when none are on.
+function summaryLineHtml(s) {
+  const t = numberSummary(s.step.number, s.points);
+  const unit = s.step.number.unit ? ' ' + s.step.number.unit : '';
+  const parts = [];
+  if (t.sum != null) parts.push(`Total ${t.sum}${unit}`);
+  if (t.diff != null) parts.push(`Change ${t.diff > 0 ? '+' : t.diff < 0 ? '−' : ''}${Math.abs(t.diff)}${unit}`);
+  if (t.avg != null) parts.push(`Average ${t.avg}${unit}`);
+  return parts.length ? `<p class="section-footer">${esc(parts.join(' · '))}</p>` : '';
 }
 
 // Returns '' (section omitted entirely) when the challenge has no
@@ -194,6 +206,7 @@ export async function renderStats(root) {
       return `
       <div class="section">
         <p class="section-header">${esc(s.step.name)} — ${esc(s.step.number.label)}${unitSuffix}</p>
+        ${summaryLineHtml(s)}
         <div class="group trend-group" data-trend-index="${i}"></div>
       </div>
     `;

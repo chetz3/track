@@ -31,9 +31,9 @@ export async function seedMock(todayStr) {
   const challenge = {
     id: ID, name: 'Mock challenge', totalDays: 30, weeklyTarget: 5, createdAt: Date.now(),
     steps: [
-      { id: 'm-body', name: 'Body check-in', mandatory: true, photo: 'required', number: { label: 'Weight', unit: 'kg', required: true }, note: 'none' },
+      { id: 'm-body', name: 'Body check-in', mandatory: true, photo: 'required', number: { label: 'Weight', unit: 'kg', required: true, showDiff: true }, note: 'none' },
       { id: 'm-meal', name: 'Healthy meal', mandatory: false, photo: 'optional', number: null, note: 'optional' },
-      { id: 'm-run', name: 'Run', mandatory: true, photo: 'none', number: { label: 'Distance', unit: 'km', required: false }, note: 'none' },
+      { id: 'm-run', name: 'Run', mandatory: true, photo: 'none', number: { label: 'Distance', unit: 'km', required: false, showSum: true, showAvg: true }, note: 'none' },
     ],
   };
   const entries = [

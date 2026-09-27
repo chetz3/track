@@ -36,3 +36,11 @@ test('ringStats derives streak and weeks', () => {
     { day: 9, totalDays: 30, weeksPassed: 1, totalWeeks: 5, streakDays: 9 });
   assert.equal(ringStats(ch, evaluation, { startDate: '2026-09-30' }, '2026-09-25').streakDays, 0);
 });
+
+test('numberSummary returns only toggled totals', async () => {
+  const { numberSummary } = await import('../js/chartMath.js');
+  const pts = [{ value: 80 }, { value: 79.5 }, { value: 77.3 }];
+  assert.deepEqual(numberSummary({ showSum: true, showDiff: true, showAvg: true }, pts), { sum: 236.8, diff: -2.7, avg: 78.93 });
+  assert.deepEqual(numberSummary({ showDiff: true }, pts), { diff: -2.7 });
+  assert.deepEqual(numberSummary({ showSum: true }, []), {});
+});
