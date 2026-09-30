@@ -38,7 +38,9 @@ export function clearGeminiKey() {
 // when Flash is overloaded (503) or unavailable.
 const MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
 const endpoint = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-const RETRYABLE = new Set([404, 500, 503]);
+// 429 too: each model has its own free-tier quota, so Lite can still answer
+// when Flash's per-minute limit is used up.
+const RETRYABLE = new Set([404, 429, 500, 503]);
 
 const PROMPT = `You are a nutrition estimator. Estimate the calories of the food in this photo.
 - List each distinct food or drink with its visible portion (use plates, cutlery, hands for scale).
@@ -93,15 +95,35 @@ function blobToBase64(blob) {
   });
 }
 
+// A 429 body carries google.rpc.QuotaFailure details naming the exact limit
+// hit, e.g. { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier',
+// quotaValue: '250', quotaDimensions: { model: 'gemini-2.5-flash' } }.
+// Google doesn't publish free-tier numbers, so this is the only concrete
+// source — surfaced in the error text as "(limit 250/day on gemini-2.5-flash)".
+function quotaLimitText(bodyText) {
+  try {
+    const details = JSON.parse(bodyText).error.details || [];
+    const v = details.flatMap((d) => d.violations || []).find((x) => x.quotaValue);
+    if (!v) return '';
+    const per = /PerDay/i.test(v.quotaId) ? 'day' : /PerMinute/i.test(v.quotaId) ? 'min' : '';
+    const model = v.quotaDimensions && v.quotaDimensions.model;
+    return ` (limit ${v.quotaValue}${per ? '/' + per : ''}${model ? ' on ' + model : ''})`;
+  } catch (_) {
+    return '';
+  }
+}
+
 function friendlyError(status, bodyText) {
-  if (status === 429) return 'Gemini free-tier limit reached. Try again in a minute.';
+  if (status === 429) console.warn('Gemini quota hit:', bodyText);
+  if (status === 429 && /PerDay/i.test(bodyText || '')) return `Gemini free-tier daily limit reached${quotaLimitText(bodyText)}. Try again tomorrow.`;
+  if (status === 429) return `Gemini free-tier limit reached${quotaLimitText(bodyText)}. Try again in a minute.`;
   if (status === 401 || status === 403) return 'Gemini API key is invalid.';
   if (status === 400 && /API_KEY_INVALID/.test(bodyText || '')) return 'Gemini API key is invalid.';
   return `Gemini error (${status})`;
 }
 
 // Shared by estimateCalories/suggestMeals/checkBody: the key/offline checks,
-// the model-fallback fetch loop (Flash first, Lite on a 404/500/503), the
+// the model-fallback fetch loop (Flash first, Lite on a 404/429/500/503), the
 // friendly-error mapping, and pulling the answer text out of the response
 // (thinking models can return thought parts first — keep only the rest).
 // Returns the parsed JSON body; each caller applies its own
