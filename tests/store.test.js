@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { nextSelectedId, applyStepPatch, resnapshotToday, validateChallengeInput } from '../js/storeLogic.js';
+import { buildFoodPatch } from '../js/foodLogic.js';
 
 const body = { id: 'body', name: 'Body', mandatory: true, photo: 'required', number: { label: 'Weight', unit: 'kg', required: true }, note: 'none' };
 const read = { id: 'read', name: 'Read', mandatory: true, photo: 'none', number: null, note: 'none' };
+const food = { id: 'food', name: 'Food', mandatory: true, photo: 'none', number: { label: 'Calories', unit: 'kcal', required: false }, note: 'none', type: 'food' };
 
 test('nextSelectedId keeps current unless it was deleted', () => {
   const cs = [{ id: 'a' }, { id: 'b' }];
@@ -26,6 +28,16 @@ test('applyStepPatch never auto-ticks steps without required fields, and respect
 
 test('applyStepPatch clears a number when value is undefined', () => {
   assert.deepEqual(applyStepPatch(body, { value: 5, done: false }, { value: undefined }), { done: false });
+});
+
+test('applyStepPatch: a buildFoodPatch merge never touches an existing planned array (docs §9)', () => {
+  const planned = [{ id: 'p1', slot: 'Lunch', time: '13:00', dish: 'Rice and dal', kcal: 450 }];
+  const entry = { planned, meals: [], value: 0, macros: { protein: 0, carbs: 0, fat: 0, fiber: 0 }, done: false };
+  const meals = [{ id: 'm1', dish: 'Idli', calories: 200, macros: { protein: 6, carbs: 40, fat: 2, fiber: 3 } }];
+  const next = applyStepPatch(food, entry, buildFoodPatch(entry, meals));
+  assert.deepEqual(next.planned, planned);
+  assert.equal(next.value, 200);
+  assert.deepEqual(next.macros, { protein: 6, carbs: 40, fat: 2, fiber: 3 });
 });
 
 test('resnapshotToday follows the new mandatory list and ignores missing day', () => {

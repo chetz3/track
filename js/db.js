@@ -145,6 +145,11 @@ export async function deleteChallengeCascade(challengeId) {
     for (const d of e.target.result) {
       for (const entry of Object.values(d.steps || {})) {
         if (entry && entry.photoId) tx.objectStore('photos').delete(entry.photoId);
+        if (entry && Array.isArray(entry.meals)) {
+          for (const meal of entry.meals) {
+            if (meal && meal.photoId) tx.objectStore('photos').delete(meal.photoId);
+          }
+        }
       }
       days.delete(d.key);
     }
