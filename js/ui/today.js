@@ -699,10 +699,10 @@ function foodConfirmBodyHtml(state) {
       <input type="text" inputmode="numeric" data-role="food-total" value="${esc(String(state.total))}" />
       <span class="field-unit">kcal</span>
     </div>
-    <div class="row">
+    ${state.manual ? manualMacroRowsHtml(state.macros) : `<div class="row">
       <span class="field-label">Macros</span>
       <span class="row-value">${esc(macroInlineLine(state.macros))}</span>
-    </div>
+    </div>`}
     <div class="row">
       <span class="field-label">Note</span>
       <input type="text" data-role="food-note" value="${esc(state.note)}" placeholder="Optional, e.g. 'no rice'" />
@@ -714,6 +714,16 @@ function foodConfirmBodyHtml(state) {
     <button type="button" class="btn btn-secondary" data-role="food-cancel">Cancel</button>
   </div>
   <button type="button" class="btn btn-primary" data-role="food-save"${disabledAttr}>Save</button>`;
+}
+
+// Manual entry (the estimate failed): one optional gram field per macro;
+// blank saves as 0.
+function manualMacroRowsHtml(macros) {
+  return MACRO_KEYS.map((key) => `<div class="row">
+      <span class="field-label">${esc(MACRO_META[key].label)}</span>
+      <input type="text" inputmode="numeric" data-role="food-macro" data-key="${esc(key)}" value="${esc(String(macros[key] ?? ''))}" placeholder="Optional" />
+      <span class="field-unit">g</span>
+    </div>`).join('');
 }
 
 // A total must be a plain non-negative integer — mirrors parseIntStrict in
@@ -731,8 +741,14 @@ function parseTotalStrict(s) {
 // the new meal is linked to it (`meal.plannedId`) so that placeholder's row
 // turns "Logged" (see js/mealPlan.js's placeholderStatus). undefined for the
 // ordinary "Add food" flow, which never links to anything.
-function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId) {
-  const state = { dish: result.dish || '', items: result.items, total: result.total, macros: result.macros, note: '', busy: false, error: '' };
+//
+// `result` is null when the estimate failed (limit, offline, busy): the sheet
+// then opens in manual mode — blank dish/total, optional macro fields, and
+// `initialError` shown — so the meal can still be logged, or re-estimated.
+function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, initialError) {
+  const state = !result
+    ? { dish: '', items: [], total: '', macros: { protein: '', carbs: '', fat: '', fiber: '' }, note: '', busy: false, error: initialError || '', manual: true }
+    : { dish: result.dish || '', items: result.items, total: result.total, macros: result.macros, note: '', busy: false, error: '', manual: false };
   let saved = false;
   let sheetEl = null;
 
@@ -758,6 +774,7 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId) {
       if (role === 'food-dish') state.dish = e.target.value;
       else if (role === 'food-note') state.note = e.target.value;
       else if (role === 'food-total') state.total = e.target.value;
+      else if (role === 'food-macro') state.macros[e.target.dataset.key] = e.target.value;
     });
 
     el.addEventListener('click', async (e) => {
@@ -780,6 +797,7 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId) {
             state.items = fresh.items;
             state.total = fresh.total;
             state.macros = fresh.macros;
+            state.manual = false;
           }
         } catch (err) {
           state.error = err.message || "Couldn't re-estimate. Please try again.";
@@ -798,6 +816,20 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId) {
           rerenderSheet();
           return;
         }
+        let macros = state.macros;
+        if (state.manual) {
+          macros = {};
+          for (const key of MACRO_KEYS) {
+            const raw = String(state.macros[key] ?? '').trim();
+            const g = raw === '' ? 0 : parseTotalStrict(raw);
+            if (!Number.isFinite(g) || g > 500) {
+              state.error = `Enter a valid ${MACRO_META[key].label.toLowerCase()} (0–500 g) or leave it blank.`;
+              rerenderSheet();
+              return;
+            }
+            macros[key] = g;
+          }
+        }
         state.busy = true;
         state.error = '';
         rerenderSheet();
@@ -809,7 +841,7 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId) {
             photoId,
             dish: state.dish.trim(),
             calories: parsedTotal,
-            macros: state.macros,
+            macros,
             items: state.items,
             at: Date.now(),
           };
@@ -867,6 +899,18 @@ async function handleFoodFile(ctx, stepId, file, plannedId) {
   } catch (err) {
     console.error('Food estimate failed:', err);
     savingByKey.delete(key);
+    // The photo is saved but Gemini failed (limit, offline, busy): keep it
+    // and let the user enter the meal by hand. The sheet's onClose still
+    // deletes the photo if they cancel.
+    if (photoId && !(err && err.code)) {
+      rerenderIfCurrent(ctx);
+      const blob = await getPhotoBlob(photoId).catch(() => null);
+      if (blob) {
+        openFoodConfirmSheet(ctx, stepId, photoId, blob, null, plannedId,
+          `${err.message || "Couldn't estimate calories."} Enter it yourself or tap Re-estimate.`);
+        return;
+      }
+    }
     if (photoId) await deletePhoto(photoId).catch(() => {});
     // err.code marks a resizeImage failure (see photos.js) — everything
     // else (no key, offline, Gemini HTTP errors) already carries a
