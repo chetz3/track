@@ -10,7 +10,7 @@ import { dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue,
 import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
 import { esc, formatDateLong, hydratePhotos, readFileAsPhoto } from './dom.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
-import { estimateCalories, suggestMeals, checkBody } from '../gemini.js';
+import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
 import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus } from '../mealPlan.js';
@@ -710,7 +710,7 @@ function foodConfirmBodyHtml(state) {
   </div>
   ${errorHtml}
   <div class="btn-pair">
-    <button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? 'Re-estimating…' : 'Re-estimate'}</button>
+    ${getGeminiKey() ? `<button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? 'Re-estimating…' : 'Re-estimate'}</button>` : ''}
     <button type="button" class="btn btn-secondary" data-role="food-cancel">Cancel</button>
   </div>
   <button type="button" class="btn btn-primary" data-role="food-save"${disabledAttr}>Save</button>`;
@@ -886,6 +886,17 @@ async function handleFoodFile(ctx, stepId, file, plannedId) {
     rerenderIfCurrent(ctx); // show "Analyzing…" right away, before the (possibly slow) resize/upload below
     photoId = await savePhoto(file);
     const blob = await getPhotoBlob(photoId);
+    // AI not available (no key, or offline): skip the call and go straight
+    // to manual entry — the photo still logs the meal.
+    const noAiReason = !getGeminiKey()
+      ? 'No Gemini key set — enter the meal yourself. (Add a key in Challenges → Gemini AI to estimate automatically.)'
+      : !navigator.onLine ? "You're offline — enter the meal yourself." : '';
+    if (noAiReason) {
+      savingByKey.delete(key);
+      rerenderIfCurrent(ctx);
+      openFoodConfirmSheet(ctx, stepId, photoId, blob, null, plannedId, noAiReason);
+      return;
+    }
     const result = await estimateCalories(blob);
     savingByKey.delete(key);
     if (!result.isFood) {
