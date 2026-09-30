@@ -25,7 +25,10 @@ import { getGeminiKey, setGeminiKey, clearGeminiKey } from '../gemini.js';
 import { defaultSlots, ifSlots, scheduleOf } from '../mealPlan.js';
 
 // Classic keys look like "AIza…"; newer AI Studio keys like "AQ.Ab8R…" (with a dot).
-const GEMINI_KEY_RE = /^[A-Za-z0-9._-]{20,}$/;
+// Fitness weeks need 5 green days; the 3rd red day in a week resets.
+const FITNESS_WEEKLY_TARGET = 5;
+
+const GEMINI_KEY_RE =/^[A-Za-z0-9._-]{20,}$/;
 
 const LAST_EXPORT_KEY = 'tracker:lastExportAt';
 
@@ -675,11 +678,13 @@ function buildFormHtml({ draft, error, isNew, challenge, saving }) {
       <input type="date" data-role="startDate" value="${esc(draft.startDate)}" min="${esc(addDays(store.today(), -1))}" />
     </div>` : '';
 
-  // "Green days per week" is meaningless for fitness challenges (they use
-  // the hard-daily reset and always store weeklyTarget: 7 — see
-  // js/rules.js's evaluateAttempt) so the field is hidden rather than shown
-  // and ignored.
-  const weeklyTargetRow = isFitness ? '' : `<div class="row">
+  // Fitness challenges always store weeklyTarget: FITNESS_WEEKLY_TARGET and
+  // reset as soon as a week can no longer reach it (see js/rules.js's
+  // evaluateAttempt), so the field is shown read-only.
+  const weeklyTargetRow = isFitness ? `<div class="row">
+        <span class="field-label">Green days per week</span>
+        <span class="row-value">${FITNESS_WEEKLY_TARGET} of 7</span>
+      </div>` : `<div class="row">
         <span class="field-label">Green days per week</span>
         <input type="text" inputmode="numeric" data-role="weeklyTarget" value="${esc(draft.weeklyTarget)}" />
       </div>`;
@@ -736,7 +741,7 @@ async function handleSave() {
     // daily reset in js/rules.js's evaluateAttempt) — the field is hidden
     // in the form and forced to 7 here rather than left to whatever stale
     // value the draft happens to carry.
-    weeklyTarget: isFitness ? 7 : parseIntStrict(formDraft.weeklyTarget),
+    weeklyTarget: isFitness ? FITNESS_WEEKLY_TARGET : parseIntStrict(formDraft.weeklyTarget),
     steps: formDraft.steps,
     category: formDraft.category,
   };

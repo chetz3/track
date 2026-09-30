@@ -157,13 +157,20 @@ export function evaluateAttempt(challenge, attempt, daysMap, today) {
     const weekStartDate = addDays(startDate, dayNumber - 1);
     let weekEndDate = weekStartDate;
     let fitnessReset = false;
+    // Fitness: reset the moment this week can no longer reach weeklyTarget
+    // green days (5 of 7 → the 3rd red day; a shorter final week needs
+    // min(target, its length)).
+    const weekLength = Math.min(7, totalDays - dayNumber + 1);
+    const allowedRed = weekLength - Math.min(weeklyTarget, weekLength);
+    let redCount = 0;
     for (let i = 0; i < 7 && dayNumber <= totalDays; i++, dayNumber++) {
       const date = addDays(startDate, dayNumber - 1);
       const day = daysMap[date];
       const ds = dayStatus(date, day, challenge, today);
       weekDayStatuses.push(ds);
       weekEndDate = date;
-      if (isFitness && weekIndex >= frozenWeeks && ds === 'red') {
+      if (ds === 'red') redCount++;
+      if (isFitness && weekIndex >= frozenWeeks && redCount > allowedRed) {
         fitnessReset = true;
         break;
       }

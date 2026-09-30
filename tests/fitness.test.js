@@ -226,6 +226,24 @@ test('fitness: a single locked red day resets immediately, without waiting for t
   assert.equal(result.weeks[0].status, 'red');
 });
 
+test('fitness 5 of 7: two red days in a week are allowed, the third resets immediately', () => {
+  const start = addDays(TODAY, -10);
+  const attempt = { id: 'a1', startDate: start, status: 'active' };
+  // Pattern for days 1-7: G R G R G G G -> week passes with 5 green.
+  const days = {};
+  for (const i of [0, 2, 4, 5, 6]) days[addDays(start, i)] = doneDay(addDays(start, i));
+  const ok = evaluateAttempt(fitnessChallenge({ totalDays: 7, weeklyTarget: 5 }), attempt, days, TODAY);
+  assert.equal(ok.outcome, 'complete');
+  assert.equal(ok.weeks[0].status, 'green');
+
+  // Day 5 red too -> third red day, reset right there.
+  delete days[addDays(start, 4)];
+  const bad = evaluateAttempt(fitnessChallenge({ totalDays: 7, weeklyTarget: 5 }), attempt, days, TODAY);
+  assert.equal(bad.outcome, 'reset');
+  assert.equal(bad.resetDate, addDays(start, 5));
+  assert.deepEqual(bad.weeks[0].dayStatuses, ['green', 'red', 'green', 'red', 'red']);
+});
+
 test('fitness: yesterday staying incomplete does not count yet (still editable)', () => {
   const start = addDays(TODAY, -1); // day 1 = yesterday, day 2 = today
   const attempt = { id: 'a1', startDate: start, status: 'active' };
