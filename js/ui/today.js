@@ -6,9 +6,14 @@
 // hydratePhotos only on that attached container.
 
 import * as store from '../store.js';
-import { dayStatus, isEditable, isStepComplete, parseNumberInput, addDays, diffDays } from '../rules.js';
-import { savePhoto, deletePhoto } from '../photos.js';
+import { dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
+import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
 import { esc, formatDateLong, hydratePhotos, readFileAsPhoto } from './dom.js';
+import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
+import { estimateCalories, suggestMeals, checkBody } from '../gemini.js';
+import { openSheet } from './sheet.js';
+import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
+import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus } from '../mealPlan.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -183,6 +188,18 @@ function computeDayContext(challenge, attempt, date, day, todayStr) {
   return { dayNumber, totalDays, weekNum, green, weekTarget, status, outside };
 }
 
+// "Eating window 12:00–20:00 · open · closes in 3h" — Today only, and only
+// for an intermittent-fasting fitness challenge (docs §9's Decisions #2:
+// "shown on Today, for intermittent fasting only"). Computed fresh from the
+// current wall-clock time on every render; no timers.
+function eatingWindowLineHtml(challenge, date, todayStr) {
+  if (date !== todayStr || !challenge || challenge.category !== 'fitness') return '';
+  const schedule = scheduleOf(challenge.profile || {});
+  const nowHHMM = new Date().toTimeString().slice(0, 5);
+  const text = windowStatus(schedule, nowHHMM);
+  return text ? `<p class="section-footer">${esc(text)}</p>` : '';
+}
+
 function popClassFor(key, status) {
   const prev = lastStatusByKey.get(key);
   lastStatusByKey.set(key, status);
@@ -197,9 +214,23 @@ function switcherHtml(challenges, selectedId) {
   ).join('')}</div>`;
 }
 
-function stepSummaryHtml(step, entry) {
+// `target` is the day-snapshotted target for this step (see
+// fitness.targetFor), or null for a step without a goal. A goal-bearing step
+// shows "actual / target unit" (e.g. "1.5 / 2.8 L"), turning green (`.met`)
+// once meetsGoal is satisfied — see the Phase A spec's Today section.
+function stepSummaryHtml(step, entry, target) {
   const parts = [];
   if (entry.photoId) parts.push(`<img class="thumb" data-photo-id="${esc(entry.photoId)}" alt="" />`);
+  if (step.goal && target != null) {
+    const unit = step.number && step.number.unit ? ' ' + esc(step.number.unit) : '';
+    if (isNumberValue(entry.value)) {
+      const met = isStepComplete(step, entry, target);
+      parts.push(`<span class="${met ? 'met' : ''}">${esc(entry.value)} / ${esc(target)}${unit}</span>`);
+    } else {
+      parts.push(`<span>Target ${esc(target)}${unit}</span>`);
+    }
+    return parts.join('');
+  }
   if (step.number && entry.value != null && entry.value !== '') {
     const unit = step.number.unit ? ' ' + esc(step.number.unit) : '';
     parts.push(`<span>${esc(String(entry.value))}${unit}</span>`);
@@ -239,9 +270,196 @@ function noteRowHtml(step, entry, fieldCtx) {
   </div>`;
 }
 
-function expandedRowsHtml(step, entry, fieldCtx) {
-  let html = '';
+// One meal row: thumbnail, dish name (with a small muted macro line under
+// it — 0s when this meal predates macros, see macroDotLine) and its calorie
+// total, with a small "x" to remove it (this is only ever rendered inside an
+// expanded row of an editable day, so the delete button is always shown —
+// see foodRowsHtml).
+function mealRowHtml(step, meal, fieldCtx) {
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <img class="thumb" data-photo-id="${esc(meal.photoId)}" alt="" />
+    <div class="row-label">
+      <div>${esc(meal.dish || 'Meal')}</div>
+      <div class="item-sub">${esc(macroDotLine(meal.macros))}</div>
+    </div>
+    <span>${esc(meal.calories)} kcal</span>
+    <button type="button" data-role="meal-delete" data-step-id="${esc(step.id)}" data-meal-id="${esc(meal.id)}" aria-label="Remove meal">×</button>
+  </div>`;
+}
+
+// One planned-meal placeholder row (docs §9's Decisions #1): time · slot ·
+// dish, a Planned/Logged pill (never a checkbox — only a linked photo
+// completes it, see placeholderStatus), and edit/delete. A still-"Planned"
+// placeholder also gets its own "Add photo" row, which runs the exact same
+// estimate flow as the ordinary "Add food" button (handleFoodFile) but
+// passes this placeholder's id through so the resulting meal links back to
+// it (meal.plannedId) instead of standing alone.
+function plannedRowHtml(step, planned, meals, fieldCtx, isSavingPhoto) {
+  const { status, label, actualKcal } = placeholderStatus(planned, meals);
+  const kcalLine = status === 'logged'
+    ? `planned ${Number.isFinite(planned.kcal) ? planned.kcal : 0} · actual ${actualKcal} kcal`
+    : (Number.isFinite(planned.kcal) && planned.kcal > 0 ? `planned ${planned.kcal} kcal` : 'No kcal set');
+  const pillClass = status === 'logged' ? 'green' : 'future';
+  const summaryRow = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <div class="row-label">
+      <div>${esc(planned.time || '')} · ${esc(planned.slot || '')} · ${esc(planned.dish || 'Meal')}</div>
+      <div class="item-sub">${esc(kcalLine)}</div>
+    </div>
+    <span class="pill ${pillClass}">${esc(label)}</span>
+    <button type="button" data-role="planned-edit" data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}" aria-label="Edit planned meal">✎</button>
+    <button type="button" data-role="planned-delete" data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}" aria-label="Remove planned meal">×</button>
+  </div>`;
+  if (status === 'logged') return summaryRow;
+  const addLabel = isSavingPhoto ? 'Analyzing…' : 'Add photo';
+  const photoRow = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <label class="btn btn-secondary photo-field-btn" style="width:100%">${esc(addLabel)}
+      <input type="file" accept="image/*" hidden data-role="planned-photo-input" data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}"${isSavingPhoto ? ' disabled' : ''} />
+    </label>
+  </div>`;
+  return summaryRow + photoRow;
+}
+
+// The day's placeholders, in time order (docs §9: "Today's Food step lists
+// the day's slots in time order"). Logged meals never belong to `planned`
+// itself (see js/foodLogic.js's buildFoodPatch) — they're only ever looked
+// up by id via placeholderStatus, to decide each row's Planned/Logged state.
+function plannedListHtml(step, entry, fieldCtx, isSavingPhoto) {
+  const meals = Array.isArray(entry.meals) ? entry.meals : [];
+  const planned = (Array.isArray(entry.planned) ? entry.planned.slice() : [])
+    .sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')));
+  return planned.map((p) => plannedRowHtml(step, p, meals, fieldCtx, isSavingPhoto)).join('');
+}
+
+// Under the Total row, when the food step has macro targets, one compact
+// "actual / target" line per macro — .met the same way stepSummaryHtml's
+// span is, via meetsGoal. Macros without a target on this step are skipped;
+// nothing is shown at all when the step has no macros (targets only —
+// photo estimates are too rough to gate anything, see docs §9).
+function macroTargetLinesHtml(step, meals, fieldCtx) {
+  if (!step.macros) return '';
+  const totals = mealsMacros(meals);
+  return MACRO_KEYS.filter((key) => step.macros[key]).map((key) => {
+    const { target, dir } = step.macros[key];
+    const met = meetsGoal(totals[key], target, dir);
+    return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+      <span class="row-label${met ? ' met' : ''}">${esc(MACRO_META[key].label)} ${esc(totals[key])} / ${esc(target)} g</span>
+    </div>`;
+  }).join('');
+}
+
+// The "Suggest tomorrow's meals" button (or, once a plan exists for this
+// date, a "Today's plan" row that reopens it) — only on the actual Today
+// screen (see docs §1's "On Today's Food step"): a day-detail view of
+// yesterday has nothing sensible to suggest "tomorrow" relative to, and a
+// saved plan's forDate only ever matches store.today() once that day
+// arrives. '' for a non-fitness/non-food-step challenge (no diet to plan
+// around) or any other date.
+function mealPlanSectionHtml(step, fieldCtx) {
+  if (fieldCtx.date !== store.today()) return '';
+  const challenge = store.state.challenges.find((c) => c.id === fieldCtx.challengeId);
+  // Suggestions need a profile (diet, targets, weight...) to plan around,
+  // which only a fitness challenge has — a food step added by hand to a
+  // custom challenge has nowhere to set Diet, so it never shows this at all.
+  if (!challenge || challenge.category !== 'fitness') return '';
+  const plan = challenge.mealPlan;
+  if (plan && plan.forDate === fieldCtx.date) {
+    return `<div class="row chevron" data-role="open-meal-plan" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+      <span class="row-label">Today's plan</span>
+    </div>`;
+  }
+  const daysMap = store.state.days[fieldCtx.challengeId] || {};
+  const hasDiet = !!(challenge.profile && challenge.profile.diet);
+  const enough = canSuggest(daysMap, step.id, fieldCtx.date);
+  const enabled = hasDiet && enough;
+  const hint = !hasDiet ? 'Set Diet in the challenge profile to get suggestions.' : !enough ? 'Log 3 meals in a day to get suggestions.' : '';
+  const hintHtml = hint ? `<div class="section-footer">${esc(hint)}</div>` : '';
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="suggest-meals" data-step-id="${esc(step.id)}"${enabled ? '' : ' disabled'}>Suggest tomorrow's meals</button>
+  </div>${hintHtml}`;
+}
+
+// Renders in place of the photo/number/note rows for a food step: one row
+// per logged meal, a running total, and the "Add food" picker that drives
+// handleFoodFile below. Errors go through the same photoErrorByKey slot the
+// photo/number/note flow uses.
+function foodRowsHtml(step, entry, fieldCtx) {
   const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
+  const meals = Array.isArray(entry.meals) ? entry.meals : [];
+  const analyzing = savingByKey.has(key);
+  const mealsHtml = meals.map((m) => mealRowHtml(step, m, fieldCtx)).join('');
+  const totalHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <span class="row-label">Total · ${esc(mealsTotal(meals))} kcal</span>
+  </div>`;
+  const macroLinesHtml = macroTargetLinesHtml(step, meals, fieldCtx);
+  // Placeholders and "Plan a meal" (docs §9) only make sense for a fitness
+  // challenge's food step — the same gate mealPlanSectionHtml below uses,
+  // since both need a profile.schedule to plan slots around.
+  const challenge = store.state.challenges.find((c) => c.id === fieldCtx.challengeId);
+  const isFitness = !!challenge && challenge.category === 'fitness';
+  const plannedHtml = isFitness ? plannedListHtml(step, entry, fieldCtx, analyzing) : '';
+  const addLabel = analyzing ? 'Analyzing…' : 'Add food';
+  const addHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <label class="btn btn-primary photo-field-btn" style="width:100%">${esc(addLabel)}
+      <input type="file" accept="image/*" hidden data-role="food-input" data-step-id="${esc(step.id)}"${analyzing ? ' disabled' : ''} />
+    </label>
+  </div>`;
+  const planMealBtnHtml = isFitness ? `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-meal-open" data-step-id="${esc(step.id)}">Plan a meal</button>
+  </div>` : '';
+  const errorMessage = photoErrorByKey.get(key);
+  const errorHtml = errorMessage ? `<div class="section-footer photo-error">${esc(errorMessage)}</div>` : '';
+  const planHtml = mealPlanSectionHtml(step, fieldCtx);
+  return `${mealsHtml}${totalHtml}${macroLinesHtml}${plannedHtml}${addHtml}${planMealBtnHtml}${errorHtml}${planHtml}`;
+}
+
+// Water: +0.25 L / +0.5 L quick-add buttons on top of the ordinary number
+// row (still there for a manual/precise entry or a correction).
+function waterRowsHtml(step, entry, fieldCtx) {
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <div class="btn-pair" style="width:100%">
+      <button type="button" class="btn btn-secondary" data-role="water-add" data-step-id="${esc(step.id)}" data-amount="0.25">+0.25 L</button>
+      <button type="button" class="btn btn-secondary" data-role="water-add" data-step-id="${esc(step.id)}" data-amount="0.5">+0.5 L</button>
+    </div>
+  </div>
+  ${numberRowHtml(step, entry, fieldCtx)}`;
+}
+
+// One logged workout session: type · minutes · kcal, with a × to delete —
+// modelled on mealRowHtml.
+function workoutSessionRowHtml(step, session, fieldCtx) {
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <span class="row-label">${esc(session.type)} · ${esc(session.minutes)} min · ${esc(session.kcal)} kcal</span>
+    <button type="button" data-role="workout-delete" data-step-id="${esc(step.id)}" data-session-id="${esc(session.id)}" aria-label="Remove session">×</button>
+  </div>`;
+}
+
+// Renders in place of the photo/number/note rows for a workout step: one row
+// per logged session, a running total, and the "Add workout" sheet opener —
+// modelled on foodRowsHtml.
+function workoutRowsHtml(step, entry, fieldCtx) {
+  const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
+  const sessions = Array.isArray(entry.sessions) ? entry.sessions : [];
+  const sessionsHtml = sessions.map((s) => workoutSessionRowHtml(step, s, fieldCtx)).join('');
+  const totalHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <span class="row-label">Total · ${esc(entry.value || 0)} min · ${esc(entry.burn || 0)} kcal</span>
+  </div>`;
+  const addHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <button type="button" class="btn btn-primary" style="width:100%" data-role="workout-add" data-step-id="${esc(step.id)}">Add workout</button>
+  </div>`;
+  const errorMessage = photoErrorByKey.get(key);
+  const errorHtml = errorMessage ? `<div class="section-footer photo-error">${esc(errorMessage)}</div>` : '';
+  return `${sessionsHtml}${totalHtml}${addHtml}${errorHtml}`;
+}
+
+function expandedRowsHtml(step, entry, fieldCtx) {
+  const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
+  if (isFoodStep(step)) return foodRowsHtml(step, entry, fieldCtx);
+  if (step.type === 'water') return waterRowsHtml(step, entry, fieldCtx);
+  if (step.type === 'workout') return workoutRowsHtml(step, entry, fieldCtx);
+  // Steps, Sleep and Body all fall through to the same generic path a
+  // custom step uses (they're photo:'none'/note:'none' with a plain number
+  // field — see js/fitness.js's makeTypedStep), so no special-casing needed.
+  let html = '';
   if (step.photo !== 'none') {
     html += photoRowHtml(step, entry, fieldCtx, savingByKey.has(key));
   }
@@ -254,7 +472,7 @@ function expandedRowsHtml(step, entry, fieldCtx) {
   return html;
 }
 
-function editableStepRowHtml(step, entry, expanded, fieldCtx) {
+function editableStepRowHtml(step, entry, expanded, fieldCtx, target) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
   // A save error on this step shows expanded (as the shared footer in
   // expandedRowsHtml, right under its fields) or, collapsed, as this short
@@ -262,25 +480,32 @@ function editableStepRowHtml(step, entry, expanded, fieldCtx) {
   // re-expand a collapsed, failed step just to find out something's wrong.
   const errorMessage = !expanded && photoErrorByKey.get(`${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`);
   const collapsedErrorHtml = errorMessage ? `<div class="step-error">${esc(errorMessage)}</div>` : '';
+  // A goal-bearing step's completion is decided entirely by meetsGoal (see
+  // isStepComplete) — the done checkbox has no effect on it, so it's shown
+  // as a read-only indicator instead of an interactive checkbox.
+  const goalMet = !!step.goal && isStepComplete(step, entry, target);
+  const checkHtml = step.goal
+    ? `<span class="check goal-check${goalMet ? ' done' : ''}" role="img" aria-label="${goalMet ? 'Target met' : 'Target not met yet'}"></span>`
+    : `<input type="checkbox" class="check" data-role="check" ${entry.done ? 'checked' : ''} />`;
   let html = `<div class="row" data-role="step-row" data-step-id="${esc(step.id)}" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <input type="checkbox" class="check" data-role="check" ${entry.done ? 'checked' : ''} />
+    ${checkHtml}
     <div class="row-label">
       <div>${esc(step.name)}</div>
       ${requiredCaption}
       ${collapsedErrorHtml}
     </div>
-    <div class="step-summary">${stepSummaryHtml(step, entry)}</div>
+    <div class="step-summary">${stepSummaryHtml(step, entry, target)}</div>
   </div>`;
   if (expanded) html += expandedRowsHtml(step, entry, fieldCtx);
   return html;
 }
 
-function readOnlyStepRowHtml(step, entry) {
+function readOnlyStepRowHtml(step, entry, target) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
   const noteHtml = entry.note ? `<div class="step-note">${esc(entry.note)}</div>` : '';
-  const complete = isStepComplete(step, entry);
+  const complete = isStepComplete(step, entry, target);
   const check = `<span class="ro-check${complete ? ' done' : ''}">${complete ? '✓' : '–'}</span>`;
-  const summary = stepSummaryHtml(step, entry);
+  const summary = stepSummaryHtml(step, entry, target);
   return `<div class="row">
     <div class="row-label">
       <div>${esc(step.name)}</div>
@@ -449,6 +674,881 @@ async function handlePhotoFile(ctx, stepId, file) {
   }
 }
 
+// ---------- food photo -> calorie estimate flow ----------
+
+function makeMealId() {
+  return 'm-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function foodItemLineHtml(item) {
+  return `<div class="row"><span class="row-label">${esc(item.name)} · ${esc(item.portion)} · ${esc(item.calories)} kcal · ${esc(macroInlineLine(item.macros))}</span></div>`;
+}
+
+function foodConfirmBodyHtml(state) {
+  const itemsHtml = state.items.map(foodItemLineHtml).join('');
+  const errorHtml = state.error ? `<div class="section-footer error">${esc(state.error)}</div>` : '';
+  const disabledAttr = state.busy ? ' disabled' : '';
+  return `<div class="group">
+    <div class="row">
+      <span class="field-label">Dish</span>
+      <input type="text" data-role="food-dish" value="${esc(state.dish)}" placeholder="Dish name" />
+    </div>
+    ${itemsHtml}
+    <div class="row">
+      <span class="field-label">Total</span>
+      <input type="text" inputmode="numeric" data-role="food-total" value="${esc(String(state.total))}" />
+      <span class="field-unit">kcal</span>
+    </div>
+    <div class="row">
+      <span class="field-label">Macros</span>
+      <span class="row-value">${esc(macroInlineLine(state.macros))}</span>
+    </div>
+    <div class="row">
+      <span class="field-label">Note</span>
+      <input type="text" data-role="food-note" value="${esc(state.note)}" placeholder="Optional, e.g. 'no rice'" />
+    </div>
+  </div>
+  ${errorHtml}
+  <div class="btn-pair">
+    <button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? 'Re-estimating…' : 'Re-estimate'}</button>
+    <button type="button" class="btn btn-secondary" data-role="food-cancel">Cancel</button>
+  </div>
+  <button type="button" class="btn btn-primary" data-role="food-save"${disabledAttr}>Save</button>`;
+}
+
+// A total must be a plain non-negative integer — mirrors parseIntStrict in
+// js/ui/challenges.js.
+function parseTotalStrict(s) {
+  const t = String(s ?? '').trim();
+  return /^\d+$/.test(t) ? parseInt(t, 10) : NaN;
+}
+
+// Opens the confirm sheet for a just-estimated meal. `photoId` was already
+// written to the `photos` store by handleFoodFile; unless Save succeeds,
+// onClose (covers Cancel, Escape, the backdrop, and being superseded by
+// another sheet) deletes it so nothing orphaned is left behind. `plannedId`
+// (docs §9), when set, came from a placeholder's own "Add photo" — on Save
+// the new meal is linked to it (`meal.plannedId`) so that placeholder's row
+// turns "Logged" (see js/mealPlan.js's placeholderStatus). undefined for the
+// ordinary "Add food" flow, which never links to anything.
+function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId) {
+  const state = { dish: result.dish || '', items: result.items, total: result.total, macros: result.macros, note: '', busy: false, error: '' };
+  let saved = false;
+  let sheetEl = null;
+
+  const render = () => `<div id="food-confirm-root">${foodConfirmBodyHtml(state)}</div>`;
+
+  const close = openSheet({
+    title: 'Confirm meal',
+    bodyHtml: render(),
+    onMount: (el) => { sheetEl = el; wire(el); },
+    onClose: () => {
+      if (!saved) deletePhoto(photoId).catch(() => {});
+    },
+  });
+
+  function rerenderSheet() {
+    const root = sheetEl.querySelector('#food-confirm-root');
+    if (root) root.outerHTML = render();
+  }
+
+  function wire(el) {
+    el.addEventListener('input', (e) => {
+      const role = e.target.dataset.role;
+      if (role === 'food-dish') state.dish = e.target.value;
+      else if (role === 'food-note') state.note = e.target.value;
+      else if (role === 'food-total') state.total = e.target.value;
+    });
+
+    el.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-role="food-cancel"]')) {
+        close();
+        return;
+      }
+
+      if (e.target.closest('[data-role="food-reestimate"]')) {
+        if (state.busy) return;
+        state.busy = true;
+        state.error = '';
+        rerenderSheet();
+        try {
+          const fresh = await estimateCalories(blob, state.note);
+          if (!fresh.isFood) {
+            state.error = 'No food found in that photo.';
+          } else {
+            state.dish = fresh.dish || state.dish;
+            state.items = fresh.items;
+            state.total = fresh.total;
+            state.macros = fresh.macros;
+          }
+        } catch (err) {
+          state.error = err.message || "Couldn't re-estimate. Please try again.";
+        } finally {
+          state.busy = false;
+          rerenderSheet();
+        }
+        return;
+      }
+
+      if (e.target.closest('[data-role="food-save"]')) {
+        if (state.busy) return;
+        const parsedTotal = parseTotalStrict(state.total);
+        if (!Number.isFinite(parsedTotal)) {
+          state.error = 'Enter a valid total.';
+          rerenderSheet();
+          return;
+        }
+        state.busy = true;
+        state.error = '';
+        rerenderSheet();
+        try {
+          const day = store.getDay(ctx.challengeId, ctx.date);
+          const entry = (day.steps && day.steps[stepId]) || {};
+          const newMeal = {
+            id: makeMealId(),
+            photoId,
+            dish: state.dish.trim(),
+            calories: parsedTotal,
+            macros: state.macros,
+            items: state.items,
+            at: Date.now(),
+          };
+          if (plannedId) newMeal.plannedId = plannedId;
+          const meals = (Array.isArray(entry.meals) ? entry.meals : []).concat([newMeal]);
+          await store.updateStep(ctx.challengeId, ctx.date, stepId, buildFoodPatch(entry, meals));
+          saved = true;
+          photoErrorByKey.delete(`${ctx.challengeId}:${ctx.date}:${stepId}`);
+          markSaved(ctx);
+          close();
+        } catch (err) {
+          console.error('Save meal failed:', err);
+          state.busy = false;
+          state.error = "Couldn't save. Please try again.";
+          rerenderSheet();
+        }
+      }
+    });
+  }
+}
+
+// The "Add food" file input (and a placeholder's own "Add photo" — docs §9,
+// via `plannedId`) funnels through here, modeled on handlePhotoFile: save
+// the photo, ask Gemini to estimate its calories, then hand off to the
+// confirm sheet. Any failure along the way deletes the photo it just wrote
+// so nothing orphaned is left in the `photos` store.
+async function handleFoodFile(ctx, stepId, file, plannedId) {
+  if (!file) return;
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  let photoId = null;
+  try {
+    photoErrorByKey.delete(key);
+    // Meals only count for the day they were eaten on: EXIF date, else the
+    // file's lastModified (a fresh camera capture is always "now").
+    const takenOn = await photoDateOf(file);
+    if (takenOn !== ctx.date) {
+      photoErrorByKey.set(key, `This photo is from ${formatDateLong(takenOn)}. Add a meal photo taken on ${formatDateLong(ctx.date)}.`);
+      rerenderIfCurrent(ctx);
+      return;
+    }
+    savingByKey.set(key, true);
+    rerenderIfCurrent(ctx); // show "Analyzing…" right away, before the (possibly slow) resize/upload below
+    photoId = await savePhoto(file);
+    const blob = await getPhotoBlob(photoId);
+    const result = await estimateCalories(blob);
+    savingByKey.delete(key);
+    if (!result.isFood) {
+      await deletePhoto(photoId).catch(() => {});
+      photoErrorByKey.set(key, 'No food found in that photo.');
+      rerenderIfCurrent(ctx);
+      return;
+    }
+    rerenderIfCurrent(ctx);
+    openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId);
+  } catch (err) {
+    console.error('Food estimate failed:', err);
+    savingByKey.delete(key);
+    if (photoId) await deletePhoto(photoId).catch(() => {});
+    // err.code marks a resizeImage failure (see photos.js) — everything
+    // else (no key, offline, Gemini HTTP errors) already carries a
+    // user-facing message on err.message (see js/gemini.js).
+    photoErrorByKey.set(key, err && err.code ? messageForPhotoError(err) : (err.message || "Couldn't estimate calories. Please try again."));
+    rerenderIfCurrent(ctx);
+  }
+}
+
+// Shared by the meal "×" button: removes one meal from a food step's entry
+// and deletes its photo. Modeled on handlePhotoFile's error handling.
+async function handleMealDelete(btn) {
+  if (!confirm('Remove this meal?')) return;
+  const ctx = fieldContext(btn);
+  if (!ctx) return;
+  const stepId = btn.dataset.stepId;
+  const mealId = btn.dataset.mealId;
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  try {
+    const day = store.getDay(ctx.challengeId, ctx.date);
+    const entry = (day.steps && day.steps[stepId]) || {};
+    const meals = Array.isArray(entry.meals) ? entry.meals : [];
+    const meal = meals.find((m) => m.id === mealId);
+    const remaining = meals.filter((m) => m.id !== mealId);
+    await store.updateStep(ctx.challengeId, ctx.date, stepId, buildFoodPatch(entry, remaining));
+    if (meal && meal.photoId) await deletePhoto(meal.photoId).catch(() => {});
+    photoErrorByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    console.error('Meal delete failed:', err);
+    photoErrorByKey.set(key, "Couldn't save. Please try again.");
+    rerenderIfCurrent(ctx);
+  }
+}
+
+// ---------- planned-meal placeholders (docs §9) ----------
+
+function makePlannedId() {
+  return 'p-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// Shared by a placeholder's "×" button: removes one placeholder from a food
+// step's `planned` list. Uses store.updatePlanned (not updateStep) so this
+// still works on tomorrow's placeholders, not just today's — see
+// js/store.js's updatePlanned. Modeled on handleMealDelete.
+async function handlePlannedDelete(btn) {
+  if (!confirm('Remove this planned meal?')) return;
+  const ctx = fieldContext(btn);
+  if (!ctx) return;
+  const stepId = btn.dataset.stepId;
+  const plannedId = btn.dataset.plannedId;
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  try {
+    const day = store.getDay(ctx.challengeId, ctx.date);
+    const entry = (day.steps && day.steps[stepId]) || {};
+    const remaining = (Array.isArray(entry.planned) ? entry.planned : []).filter((p) => p.id !== plannedId);
+    await store.updatePlanned(ctx.challengeId, ctx.date, stepId, remaining);
+    photoErrorByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    console.error('Planned meal delete failed:', err);
+    photoErrorByKey.set(key, "Couldn't save. Please try again.");
+    rerenderIfCurrent(ctx);
+  }
+}
+
+function planMealSheetBodyHtml(state, slots, isEdit) {
+  const dateRow = isEdit ? '' : `<div class="row">
+    <span class="field-label">Day</span>
+    <div class="segmented">
+      <label><input type="radio" name="plan-meal-date" value="today" data-role="plan-meal-date" ${state.dateChoice === 'today' ? 'checked' : ''}><span>Today</span></label>
+      <label><input type="radio" name="plan-meal-date" value="tomorrow" data-role="plan-meal-date" ${state.dateChoice === 'tomorrow' ? 'checked' : ''}><span>Tomorrow</span></label>
+    </div>
+  </div>`;
+  const slotOptions = slots.map((s, i) => `<option value="${i}" ${state.slotIndex === i ? 'selected' : ''}>${esc(s.name)} · ${esc(s.time)}</option>`).join('');
+  const errorHtml = state.error ? `<div class="section-footer error">${esc(state.error)}</div>` : '';
+  const disabledAttr = state.busy ? ' disabled' : '';
+  return `<div class="group">
+    ${dateRow}
+    <div class="row">
+      <span class="field-label">Slot</span>
+      <select data-role="plan-meal-slot">${slotOptions}</select>
+    </div>
+    <div class="row">
+      <span class="field-label">Dish</span>
+      <input type="text" data-role="plan-meal-dish" value="${esc(state.dish)}" placeholder="Dish name" />
+    </div>
+    <div class="row">
+      <span class="field-label">Calories</span>
+      <input type="text" inputmode="numeric" data-role="plan-meal-kcal" value="${esc(state.kcal)}" placeholder="Optional" />
+      <span class="field-unit">kcal</span>
+    </div>
+  </div>
+  ${errorHtml}
+  <div class="btn-pair">
+    <button type="button" class="btn btn-secondary" data-role="plan-meal-cancel"${disabledAttr}>Cancel</button>
+    <button type="button" class="btn btn-primary" data-role="plan-meal-save"${disabledAttr}>${state.busy ? 'Saving…' : 'Save'}</button>
+  </div>`;
+}
+
+// The manual "Plan a meal" sheet (docs §9's "Ways to fill" #2): slot, dish
+// and an optional kcal, for today or tomorrow — works without any AI call at
+// all. `existing`, when set, opens it in edit mode for that one placeholder
+// (its date is fixed — only slot/dish/kcal are editable once created).
+// Saves through store.updatePlanned, same as the AI sheet's "Add to
+// tomorrow's plan"/"Add all" below.
+function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }) {
+  const isEdit = !!existing;
+  const slots = (schedule && Array.isArray(schedule.slots)) ? schedule.slots : [];
+  const initialSlotIndex = isEdit ? Math.max(0, slots.findIndex((s) => s.name === existing.slot)) : 0;
+  const state = {
+    dateChoice: 'today',
+    slotIndex: initialSlotIndex,
+    dish: isEdit ? (existing.dish || '') : '',
+    kcal: isEdit && Number.isFinite(existing.kcal) && existing.kcal > 0 ? String(existing.kcal) : '',
+    error: '',
+    busy: false,
+  };
+
+  let sheetEl = null;
+  const render = () => `<div id="plan-meal-root">${planMealSheetBodyHtml(state, slots, isEdit)}</div>`;
+
+  const close = openSheet({
+    title: isEdit ? 'Edit planned meal' : 'Plan a meal',
+    bodyHtml: render(),
+    onMount: (el) => { sheetEl = el; wire(el); },
+  });
+
+  function rerenderSheet() {
+    const root = sheetEl.querySelector('#plan-meal-root');
+    if (root) root.outerHTML = render();
+  }
+
+  function targetDate() {
+    return isEdit ? date : (state.dateChoice === 'tomorrow' ? addDays(date, 1) : date);
+  }
+
+  async function save() {
+    const dish = state.dish.trim();
+    if (!dish) {
+      state.error = 'Enter a dish.';
+      rerenderSheet();
+      return;
+    }
+    const kcalRaw = state.kcal.trim();
+    const kcalNum = kcalRaw === '' ? 0 : parseNumberInput(kcalRaw);
+    if (kcalNum === undefined || kcalNum < 0) {
+      state.error = 'Enter a valid calorie value, or leave it blank.';
+      rerenderSheet();
+      return;
+    }
+    const slot = slots[state.slotIndex] || { name: 'Meal', time: '12:00' };
+    state.busy = true;
+    state.error = '';
+    rerenderSheet();
+    try {
+      const targetD = targetDate();
+      const day = store.getDay(challengeId, targetD);
+      const entry = (day.steps && day.steps[foodStepId]) || {};
+      const list = Array.isArray(entry.planned) ? entry.planned.slice() : [];
+      if (isEdit) {
+        const idx = list.findIndex((p) => p.id === existing.id);
+        if (idx !== -1) list[idx] = { ...existing, slot: slot.name, time: slot.time, dish, kcal: Math.round(kcalNum) };
+      } else {
+        list.push({
+          id: makePlannedId(), slot: slot.name, time: slot.time, dish, kcal: Math.round(kcalNum),
+          macros: { protein: 0, carbs: 0, fat: 0, fiber: 0 }, source: 'manual',
+        });
+      }
+      await store.updatePlanned(challengeId, targetD, foodStepId, list);
+      markSaved({ challengeId, date });
+      close();
+    } catch (err) {
+      console.error('Save planned meal failed:', err);
+      state.busy = false;
+      state.error = err.message || "Couldn't save. Please try again.";
+      rerenderSheet();
+    }
+  }
+
+  function wire(el) {
+    el.addEventListener('input', (e) => {
+      const role = e.target.dataset.role;
+      if (role === 'plan-meal-dish') state.dish = e.target.value;
+      else if (role === 'plan-meal-kcal') state.kcal = e.target.value;
+    });
+    el.addEventListener('change', (e) => {
+      const role = e.target.dataset.role;
+      if (role === 'plan-meal-date') state.dateChoice = e.target.value;
+      else if (role === 'plan-meal-slot') state.slotIndex = parseInt(e.target.value, 10);
+    });
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-role="plan-meal-cancel"]')) {
+        close();
+        return;
+      }
+      if (e.target.closest('[data-role="plan-meal-save"]')) {
+        if (state.busy) return;
+        save();
+      }
+    });
+  }
+}
+
+// ---------- weekly body check (docs §3) ----------
+
+// Refreshes challenge.bodyCheck by calling Gemini with the latest Body-step
+// photo, when due: sharing is on (always required — `force`, from
+// challenges.js's Update button, only skips the staleness check), a body
+// photo exists, and the existing check is missing or older than 7 days.
+// When sharing is off, or there's no photo, this never
+// touches the network at all — js/mealPlan.js's bodyCheckText already falls
+// back to a BMI-only note for display. Exported for challenges.js's body
+// check card, the same cross-import pattern as miniRing above.
+export async function refreshBodyCheckIfDue(challenge, { force = false } = {}) {
+  const profile = challenge.profile;
+  if (!profile) return;
+  if (!profile.shareBodyPhoto) return;
+  const daysMap = store.state.days[challenge.id] || {};
+  const photoId = latestBodyPhotoId(challenge, daysMap);
+  if (!photoId) return;
+  if (!force) {
+    const last = challenge.bodyCheck && challenge.bodyCheck.date;
+    if (last && diffDays(last, store.today()) < 7) return;
+  }
+  const blob = await getPhotoBlob(photoId);
+  if (!blob) return;
+  const result = await checkBody(blob, { ...profile, currentWeightKg: latestBodyWeightKg(challenge, daysMap, profile) });
+  await store.patchChallenge(challenge.id, { bodyCheck: { date: store.today(), ...result } });
+}
+
+// ---------- meal plan sheet (docs §1) ----------
+
+function planFromChallenge(challenge) {
+  const plan = challenge.mealPlan;
+  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, forDate: plan.forDate } : null;
+}
+
+// "1480 / 1500 kcal · P 150 / 155 g …" (docs §1's totals-vs-targets line).
+// Macros without a target are skipped; '' when there's no food target at all.
+function targetsLineHtml(targets, totals) {
+  if (!targets || !totals || !Number.isFinite(targets.kcal)) return '';
+  const parts = [`${totals.kcal} / ${targets.kcal} kcal`];
+  for (const key of MACRO_KEYS) {
+    if (Number.isFinite(targets[key])) parts.push(`${MACRO_META[key].short} ${totals[key]} / ${targets[key]} g`);
+  }
+  return parts.join(' · ');
+}
+
+function bodyNoteFrom(bodyCheck) {
+  if (!bodyCheck) return '';
+  const bits = [`BMI ${bodyCheck.bmi ?? '–'}`];
+  if (bodyCheck.build) bits.push(bodyCheck.build);
+  if (bodyCheck.bellyFat) bits.push(`${bodyCheck.bellyFat} belly fat`);
+  const head = bits.join(' · ');
+  return bodyCheck.note ? `${head} — ${bodyCheck.note}` : head;
+}
+
+// `added` is true once this suggested meal has been turned into a
+// placeholder in this sheet session (docs §9's "Add to tomorrow's plan" —
+// see addMealToPlan below); tracked only for the life of the open sheet, not
+// persisted, so reopening the sheet later always offers every meal again —
+// adding the same dish twice just leaves two placeholders, which the user
+// can delete like any other (see plannedRowHtml/handlePlannedDelete).
+function planMealRowHtml(meal, index, added) {
+  const macroLine = macroInlineLine({ protein: meal.protein, carbs: meal.carbs, fat: meal.fat, fiber: meal.fiber });
+  const swapHtml = meal.swapFor ? `<div class="item-sub">Swap: ${esc(meal.swapFor)}</div>` : '';
+  return `<div class="row">
+    <div class="row-label">
+      <div>${esc(meal.slot)} · ${esc(meal.dish)}</div>
+      <div class="item-sub">${esc(meal.portion)} · ${esc(macroLine)}</div>
+      ${swapHtml}
+    </div>
+    <span>${esc(meal.kcal)} kcal</span>
+  </div>
+  <div class="row">
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-add-meal" data-index="${index}"${added ? ' disabled' : ''}>${added ? 'Added to tomorrow’s plan' : "Add to tomorrow's plan"}</button>
+  </div>`;
+}
+
+function linesHtml(title, lines) {
+  if (!lines || !lines.length) return '';
+  return `<div class="section">
+    <h2 class="section-header">${esc(title)}</h2>
+    <div class="group"><div class="row"><div class="row-label">${lines.map(esc).join('<br>')}</div></div></div>
+  </div>`;
+}
+
+function mealPlanBodyHtml(state) {
+  if (state.loading) {
+    return `<p class="section-footer">Generating your plan…</p>`;
+  }
+  if (state.error) {
+    return `<div class="section-footer error">${esc(state.error)}</div>
+      <button type="button" class="btn btn-primary" data-role="meal-plan-close">Close</button>`;
+  }
+  const mealsHtml = state.meals.map((m, i) => planMealRowHtml(m, i, state.addedIndices.has(i))).join('');
+  const targetsHtml = targetsLineHtml(state.targets, state.totals);
+  const warningHtml = state.warning ? `<p class="section-footer error">${esc(state.warning)}</p>` : '';
+  const bodyNote = bodyNoteFrom(state.bodyCheck);
+  const allAdded = state.meals.length > 0 && state.meals.every((_, i) => state.addedIndices.has(i));
+  const addAllDisabled = state.busy || allAdded || state.meals.length === 0;
+  const addAllError = state.addError ? `<p class="section-footer error">${esc(state.addError)}</p>` : '';
+  return `<div class="group">${mealsHtml}</div>
+    ${targetsHtml ? `<p class="section-footer">${esc(targetsHtml)}</p>` : ''}
+    ${warningHtml}
+    ${linesHtml('Why this plan', state.why)}
+    ${bodyNote ? `<p class="section-footer">${esc(bodyNote)}</p>` : ''}
+    ${linesHtml('Tips', state.tips)}
+    <button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : 'Add all to tomorrow’s plan'}</button>
+    ${addAllError}
+    <div class="btn-pair">
+      <button type="button" class="btn btn-secondary" data-role="meal-plan-new"${state.busy ? ' disabled' : ''}>${state.busy ? 'Thinking…' : 'New ideas'}</button>
+      <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Close</button>
+    </div>
+    <p class="section-footer">Not medical advice.</p>`;
+}
+
+// Opens the plan sheet. `opts.generate` (from the "Suggest tomorrow's
+// meals" button) fetches a fresh plan for `opts.forDate` before showing
+// anything; otherwise (the "Today's plan" row) it shows the saved plan
+// straight away, still refreshed against the current targets/body-check text
+// (both pure, no network — see js/mealPlan.js).
+function openMealPlanSheet(ctx, opts = {}) {
+  const challenge = store.state.challenges.find((c) => c.id === ctx.challengeId);
+  if (!challenge) return;
+  const existing = planFromChallenge(challenge);
+  if (!existing && !opts.generate) return;
+
+  const daysMap = store.state.days[ctx.challengeId] || {};
+  const input = buildSuggestionInput(challenge, daysMap, ctx.date);
+  // The schedule whose slot times back-fill each added placeholder's `time`
+  // (docs §9) — refreshed alongside everything else on "New ideas", via
+  // runGenerate's freshInput below.
+  let currentSchedule = input.profile.schedule;
+
+  const state = {
+    loading: !!opts.generate,
+    busy: false,
+    error: '',
+    forDate: opts.generate ? opts.forDate : existing.forDate,
+    meals: existing ? existing.meals : [],
+    why: existing ? existing.why : [],
+    tips: existing ? existing.tips : [],
+    totals: existing ? planTotals({ meals: existing.meals }) : null,
+    warning: null,
+    targets: input.targets,
+    bodyCheck: input.bodyCheck,
+    // Which suggested meals (by index into state.meals) have been turned
+    // into a placeholder this sheet session — see planMealRowHtml/
+    // addMealToPlan/addAllMealsToPlan. Reset whenever state.meals changes.
+    addedIndices: new Set(),
+    addError: '',
+  };
+
+  let sheetEl = null;
+  const render = () => `<div id="meal-plan-root">${mealPlanBodyHtml(state)}</div>`;
+
+  const close = openSheet({
+    title: "Tomorrow's meal plan",
+    bodyHtml: render(),
+    onMount: (el) => { sheetEl = el; wire(el); if (opts.generate) runGenerate(opts.avoidDishes); },
+  });
+
+  function rerenderSheet() {
+    const root = sheetEl.querySelector('#meal-plan-root');
+    if (root) root.outerHTML = render();
+  }
+
+  async function runGenerate(avoidDishes) {
+    state.busy = true;
+    state.error = '';
+    rerenderSheet();
+    try {
+      // The weekly body check (if due) refreshes first, so this suggestion
+      // uses the freshest body-check text — see refreshBodyCheckIfDue.
+      await refreshBodyCheckIfDue(challenge).catch((err) => console.error('Body check failed:', err));
+      const freshChallenge = store.state.challenges.find((c) => c.id === ctx.challengeId) || challenge;
+      const freshDaysMap = store.state.days[ctx.challengeId] || {};
+      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date);
+      const result = await suggestMeals(freshInput, avoidDishes);
+      await store.patchChallenge(ctx.challengeId, {
+        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips },
+      });
+      state.meals = result.meals;
+      state.why = result.why;
+      state.tips = result.tips;
+      state.totals = result.totals;
+      state.warning = result.warning;
+      state.targets = freshInput.targets;
+      state.bodyCheck = freshInput.bodyCheck;
+      currentSchedule = freshInput.profile.schedule;
+      // A fresh plan means fresh meals at the same indices — nothing
+      // suggested a moment ago is still "added" against this new list.
+      state.addedIndices = new Set();
+      state.addError = '';
+    } catch (err) {
+      console.error('Meal suggestion failed:', err);
+      state.error = err.message || "Couldn't get suggestions. Please try again.";
+    } finally {
+      state.loading = false;
+      state.busy = false;
+      rerenderSheet();
+    }
+  }
+
+  // Matches a suggested meal's slot name to this schedule's slot time
+  // (case-insensitively — Gemini is asked to echo the slot name exactly, but
+  // never trusted to get the casing right); '12:00' when nothing matches.
+  function slotTimeFor(slotName) {
+    const slots = (currentSchedule && Array.isArray(currentSchedule.slots)) ? currentSchedule.slots : [];
+    const match = slots.find((s) => String(s.name).toLowerCase() === String(slotName || '').toLowerCase());
+    return match ? match.time : '12:00';
+  }
+
+  function aiMealToPlaceholder(meal) {
+    return {
+      id: makePlannedId(),
+      slot: meal.slot,
+      time: slotTimeFor(meal.slot),
+      dish: meal.dish,
+      portion: meal.portion,
+      kcal: meal.kcal,
+      macros: { protein: meal.protein, carbs: meal.carbs, fat: meal.fat, fiber: meal.fiber },
+      source: 'ai',
+    };
+  }
+
+  // Appends placeholders to tomorrow's (state.forDate's) food-step `planned`
+  // list via store.updatePlanned — same store call the manual "Plan a meal"
+  // sheet uses (js/store.js's updatePlanned works for today or tomorrow).
+  async function addPlaceholders(newPlaceholders) {
+    const foodStep = (challenge.steps || []).find((s) => s.type === 'food');
+    if (!foodStep) throw new Error("This challenge has no Food step to plan.");
+    const day = store.getDay(ctx.challengeId, state.forDate);
+    const entry = (day.steps && day.steps[foodStep.id]) || {};
+    const list = (Array.isArray(entry.planned) ? entry.planned : []).concat(newPlaceholders);
+    await store.updatePlanned(ctx.challengeId, state.forDate, foodStep.id, list);
+  }
+
+  async function addMealToPlan(index) {
+    if (state.addedIndices.has(index)) return;
+    const meal = state.meals[index];
+    if (!meal) return;
+    state.addError = '';
+    try {
+      await addPlaceholders([aiMealToPlaceholder(meal)]);
+      state.addedIndices.add(index);
+      markSaved(ctx);
+      rerenderSheet();
+    } catch (err) {
+      console.error('Add to plan failed:', err);
+      state.addError = err.message || "Couldn't add to your plan. Please try again.";
+      rerenderSheet();
+    }
+  }
+
+  async function addAllMealsToPlan() {
+    const toAdd = state.meals.map((m, i) => i).filter((i) => !state.addedIndices.has(i));
+    if (!toAdd.length) return;
+    state.addError = '';
+    try {
+      await addPlaceholders(toAdd.map((i) => aiMealToPlaceholder(state.meals[i])));
+      for (const i of toAdd) state.addedIndices.add(i);
+      markSaved(ctx);
+      rerenderSheet();
+    } catch (err) {
+      console.error('Add all to plan failed:', err);
+      state.addError = err.message || "Couldn't add to your plan. Please try again.";
+      rerenderSheet();
+    }
+  }
+
+  function wire(el) {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-role="meal-plan-close"]')) {
+        close();
+        return;
+      }
+      if (e.target.closest('[data-role="meal-plan-new"]')) {
+        if (state.busy) return;
+        const avoidDishes = state.meals.map((m) => m.dish).filter(Boolean);
+        runGenerate(avoidDishes);
+        return;
+      }
+      const addMealBtn = e.target.closest('[data-role="plan-add-meal"]');
+      if (addMealBtn) {
+        addMealToPlan(parseInt(addMealBtn.dataset.index, 10));
+        return;
+      }
+      if (e.target.closest('[data-role="plan-add-all"]')) {
+        addAllMealsToPlan();
+      }
+    });
+  }
+}
+
+// ---------- water quick-add ----------
+
+// Shared by the +0.25 L / +0.5 L buttons: adds `amount` to whatever's
+// currently stored (0 if nothing yet), rounded to avoid float noise
+// (0.1 + 0.25 etc.).
+async function handleWaterAdd(btn) {
+  const ctx = fieldContext(btn);
+  if (!ctx) return;
+  const stepId = btn.dataset.stepId;
+  const amount = parseFloat(btn.dataset.amount);
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  try {
+    const day = store.getDay(ctx.challengeId, ctx.date);
+    const entry = (day.steps && day.steps[stepId]) || {};
+    const current = isNumberValue(entry.value) ? entry.value : 0;
+    const next = Math.round((current + amount) * 100) / 100;
+    await store.updateStep(ctx.challengeId, ctx.date, stepId, { value: next });
+    photoErrorByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    console.error('Save failed:', err);
+    photoErrorByKey.set(key, "Couldn't save. Please try again.");
+    rerenderIfCurrent(ctx);
+  }
+}
+
+// ---------- workout sessions ----------
+
+function makeSessionId() {
+  return 'ws-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+function workoutAddBodyHtml(state) {
+  const typeOptions = WORKOUT_TYPES.map((t) => `<option value="${esc(t)}" ${state.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  const intensityOptions = INTENSITIES.map((i) => `<option value="${esc(i)}" ${state.intensity === i ? 'selected' : ''}>${esc(i)}</option>`).join('');
+  const errorHtml = state.error ? `<div class="section-footer error">${esc(state.error)}</div>` : '';
+  return `<div class="group">
+    <div class="row">
+      <span class="field-label">Type</span>
+      <select data-role="workout-type">${typeOptions}</select>
+    </div>
+    <div class="row">
+      <span class="field-label">Minutes</span>
+      <input type="text" inputmode="numeric" data-role="workout-minutes" value="${esc(state.minutes)}" />
+    </div>
+    <div class="row">
+      <span class="field-label">Intensity</span>
+      <select data-role="workout-intensity">${intensityOptions}</select>
+    </div>
+    <div class="row">
+      <span class="field-label">Calories burned</span>
+      <input type="text" inputmode="numeric" data-role="workout-kcal" value="${esc(state.kcal)}" />
+      <span class="field-unit">kcal</span>
+    </div>
+  </div>
+  ${errorHtml}
+  <div class="btn-pair">
+    <button type="button" class="btn btn-secondary" data-role="workout-cancel">Cancel</button>
+    <button type="button" class="btn btn-primary" data-role="workout-save">Save</button>
+  </div>`;
+}
+
+// "Add workout" sheet: type/minutes/intensity, with kcal auto-filled from
+// workoutBurnKcal (MET × intensity × latest body weight × minutes) and
+// editable — the auto-fill stops recomputing once the user has touched the
+// kcal field themselves, same pattern as the food confirm sheet's total.
+function openWorkoutAddSheet(ctx, stepId) {
+  const challenge = store.state.challenges.find((c) => c.id === ctx.challengeId);
+  if (!challenge) return;
+  const daysMap = store.state.days[ctx.challengeId] || {};
+  const kg = latestBodyWeightKg(challenge, daysMap, challenge.profile) || 70;
+  const state = { type: WORKOUT_TYPES[0], minutes: '30', intensity: 'moderate', kcal: '', kcalTouched: false, error: '' };
+  state.kcal = String(workoutBurnKcal({ type: state.type, minutes: Number(state.minutes), intensity: state.intensity, kg }));
+
+  let sheetEl = null;
+  const render = () => `<div id="workout-add-root">${workoutAddBodyHtml(state)}</div>`;
+
+  const close = openSheet({
+    title: 'Add workout',
+    bodyHtml: render(),
+    onMount: (el) => { sheetEl = el; wire(el); },
+  });
+
+  function rerenderSheet() {
+    const root = sheetEl.querySelector('#workout-add-root');
+    if (root) root.outerHTML = render();
+  }
+
+  function recomputeKcal() {
+    if (state.kcalTouched) return;
+    const minutes = parseNumberInput(state.minutes) || 0;
+    state.kcal = String(workoutBurnKcal({ type: state.type, minutes, intensity: state.intensity, kg }));
+  }
+
+  function wire(el) {
+    el.addEventListener('input', (e) => {
+      const role = e.target.dataset.role;
+      if (role === 'workout-minutes') {
+        state.minutes = e.target.value;
+        recomputeKcal();
+        rerenderSheet();
+      } else if (role === 'workout-kcal') {
+        state.kcal = e.target.value;
+        state.kcalTouched = true;
+      }
+    });
+
+    el.addEventListener('change', (e) => {
+      const role = e.target.dataset.role;
+      if (role === 'workout-type') {
+        state.type = e.target.value;
+        recomputeKcal();
+        rerenderSheet();
+      } else if (role === 'workout-intensity') {
+        state.intensity = e.target.value;
+        recomputeKcal();
+        rerenderSheet();
+      }
+    });
+
+    el.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-role="workout-cancel"]')) {
+        close();
+        return;
+      }
+      if (e.target.closest('[data-role="workout-save"]')) {
+        const minutes = parseNumberInput(state.minutes);
+        const kcal = parseNumberInput(state.kcal);
+        if (minutes === undefined || minutes <= 0) {
+          state.error = 'Enter minutes.';
+          rerenderSheet();
+          return;
+        }
+        if (kcal === undefined || kcal < 0) {
+          state.error = 'Enter a valid calorie value.';
+          rerenderSheet();
+          return;
+        }
+        try {
+          const day = store.getDay(ctx.challengeId, ctx.date);
+          const entry = (day.steps && day.steps[stepId]) || {};
+          const sessions = (Array.isArray(entry.sessions) ? entry.sessions : []).concat([{
+            id: makeSessionId(), type: state.type, minutes, intensity: state.intensity, kcal: Math.round(kcal),
+          }]);
+          const totalMinutes = sessions.reduce((sum, s) => sum + s.minutes, 0);
+          const totalKcal = sessions.reduce((sum, s) => sum + s.kcal, 0);
+          await store.updateStep(ctx.challengeId, ctx.date, stepId, { sessions, value: totalMinutes, burn: totalKcal });
+          photoErrorByKey.delete(`${ctx.challengeId}:${ctx.date}:${stepId}`);
+          markSaved(ctx);
+          close();
+        } catch (err) {
+          console.error('Save workout failed:', err);
+          state.error = "Couldn't save. Please try again.";
+          rerenderSheet();
+        }
+      }
+    });
+  }
+}
+
+// Shared by a session's "×" button: removes one session from a workout
+// step's entry and recomputes the totals. Modeled on handleMealDelete.
+async function handleWorkoutDelete(btn) {
+  if (!confirm('Remove this session?')) return;
+  const ctx = fieldContext(btn);
+  if (!ctx) return;
+  const stepId = btn.dataset.stepId;
+  const sessionId = btn.dataset.sessionId;
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  try {
+    const day = store.getDay(ctx.challengeId, ctx.date);
+    const entry = (day.steps && day.steps[stepId]) || {};
+    const sessions = (Array.isArray(entry.sessions) ? entry.sessions : []).filter((s) => s.id !== sessionId);
+    const totalMinutes = sessions.reduce((sum, s) => sum + s.minutes, 0);
+    const totalKcal = sessions.reduce((sum, s) => sum + s.kcal, 0);
+    await store.updateStep(ctx.challengeId, ctx.date, stepId, { sessions, value: totalMinutes, burn: totalKcal });
+    photoErrorByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    console.error('Session delete failed:', err);
+    photoErrorByKey.set(key, "Couldn't save. Please try again.");
+    rerenderIfCurrent(ctx);
+  }
+}
+
 // ---------- delegated event wiring (attached once per root) ----------
 
 // Shared by the two click branches below.
@@ -526,6 +1626,74 @@ function wireDelegation(root) {
     const summaryBtn = e.target.closest('[data-role="view-summary"]');
     if (summaryBtn) {
       location.hash = `#/summary/${summaryBtn.dataset.date}`;
+      return;
+    }
+    const mealDeleteBtn = e.target.closest('[data-role="meal-delete"]');
+    if (mealDeleteBtn) {
+      handleMealDelete(mealDeleteBtn);
+      return;
+    }
+    const waterAddBtn = e.target.closest('[data-role="water-add"]');
+    if (waterAddBtn) {
+      handleWaterAdd(waterAddBtn);
+      return;
+    }
+    const workoutAddBtn = e.target.closest('[data-role="workout-add"]');
+    if (workoutAddBtn) {
+      const ctx = fieldContext(workoutAddBtn);
+      if (ctx) openWorkoutAddSheet(ctx, workoutAddBtn.dataset.stepId);
+      return;
+    }
+    const workoutDeleteBtn = e.target.closest('[data-role="workout-delete"]');
+    if (workoutDeleteBtn) {
+      handleWorkoutDelete(workoutDeleteBtn);
+      return;
+    }
+    const suggestBtn = e.target.closest('[data-role="suggest-meals"]');
+    if (suggestBtn) {
+      const ctx = fieldContext(suggestBtn);
+      if (ctx) openMealPlanSheet(ctx, { generate: true, forDate: addDays(ctx.date, 1), avoidDishes: [] });
+      return;
+    }
+    const openPlanBtn = e.target.closest('[data-role="open-meal-plan"]');
+    if (openPlanBtn) {
+      const ctx = fieldContext(openPlanBtn);
+      if (ctx) openMealPlanSheet(ctx, { generate: false });
+      return;
+    }
+    const planMealOpenBtn = e.target.closest('[data-role="plan-meal-open"]');
+    if (planMealOpenBtn) {
+      const ctx = fieldContext(planMealOpenBtn);
+      const challenge = ctx && store.state.challenges.find((c) => c.id === ctx.challengeId);
+      if (challenge) {
+        openPlanMealSheet({
+          challengeId: ctx.challengeId, date: ctx.date, foodStepId: planMealOpenBtn.dataset.stepId,
+          schedule: scheduleOf(challenge.profile || {}), existing: null,
+        });
+      }
+      return;
+    }
+    const plannedEditBtn = e.target.closest('[data-role="planned-edit"]');
+    if (plannedEditBtn) {
+      const ctx = fieldContext(plannedEditBtn);
+      const challenge = ctx && store.state.challenges.find((c) => c.id === ctx.challengeId);
+      if (challenge) {
+        const stepId = plannedEditBtn.dataset.stepId;
+        const day = store.getDay(ctx.challengeId, ctx.date);
+        const entry = (day.steps && day.steps[stepId]) || {};
+        const existing = (Array.isArray(entry.planned) ? entry.planned : []).find((p) => p.id === plannedEditBtn.dataset.plannedId);
+        if (existing) {
+          openPlanMealSheet({
+            challengeId: ctx.challengeId, date: ctx.date, foodStepId: stepId,
+            schedule: scheduleOf(challenge.profile || {}), existing,
+          });
+        }
+      }
+      return;
+    }
+    const plannedDeleteBtn = e.target.closest('[data-role="planned-delete"]');
+    if (plannedDeleteBtn) {
+      handlePlannedDelete(plannedDeleteBtn);
       return;
     }
     const stepRow = e.target.closest('[data-role="step-row"]');
@@ -635,6 +1803,29 @@ function wireDelegation(root) {
       await handlePhotoFile(ctx, stepId, file);
       return;
     }
+
+    const foodInput = e.target.closest('[data-role="food-input"]');
+    if (foodInput) {
+      const ctx = fieldContext(foodInput);
+      if (!ctx) return;
+      const stepId = foodInput.dataset.stepId;
+      const file = readFileAsPhoto(foodInput);
+      foodInput.value = ''; // allow re-picking the same file (e.g. after a rejection)
+      await handleFoodFile(ctx, stepId, file);
+      return;
+    }
+
+    const plannedPhotoInput = e.target.closest('[data-role="planned-photo-input"]');
+    if (plannedPhotoInput) {
+      const ctx = fieldContext(plannedPhotoInput);
+      if (!ctx) return;
+      const stepId = plannedPhotoInput.dataset.stepId;
+      const plannedId = plannedPhotoInput.dataset.plannedId;
+      const file = readFileAsPhoto(plannedPhotoInput);
+      plannedPhotoInput.value = ''; // allow re-picking the same file (e.g. after a rejection)
+      await handleFoodFile(ctx, stepId, file, plannedId);
+      return;
+    }
   });
 }
 
@@ -700,10 +1891,13 @@ async function renderScreen(root, { date, dayRoute }) {
     </div>
   </div>`;
 
+  const eatingWindowHtml = eatingWindowLineHtml(challenge, date, todayStr);
+
   const stepsHtml = challenge.steps.map((step) => {
     const entry = (day.steps && day.steps[step.id]) || {};
-    if (!editable) return readOnlyStepRowHtml(step, entry);
-    return editableStepRowHtml(step, entry, expandedStepId === step.id, fieldCtx);
+    const target = targetFor(day, step);
+    if (!editable) return readOnlyStepRowHtml(step, entry, target);
+    return editableStepRowHtml(step, entry, expandedStepId === step.id, fieldCtx, target);
   }).join('');
 
   const sectionTitle = dayRoute && date !== todayStr ? 'Steps' : "Today's steps";
@@ -733,6 +1927,7 @@ async function renderScreen(root, { date, dayRoute }) {
 
   root.innerHTML = `${headerHtml}
     ${heroHtml}
+    ${eatingWindowHtml}
     ${summaryBtnHtml}
     <div class="section">
       <h2 class="section-header">${sectionTitle}</h2>

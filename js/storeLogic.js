@@ -3,6 +3,7 @@
 // tested with Node's test runner.
 
 import { requiredFieldsFilled, mandatorySnapshot, addDays } from './rules.js';
+import { baseTargets } from './fitness.js';
 
 export function nextSelectedId(challenges, deletedId, currentId) {
   if (currentId !== deletedId) return currentId;
@@ -21,7 +22,7 @@ export function applyStepPatch(stepDef, entry, patch) {
 
 export function resnapshotToday(day, challenge) {
   if (!day) return undefined;
-  return { ...day, mandatoryStepIds: mandatorySnapshot(challenge) };
+  return { ...day, mandatoryStepIds: mandatorySnapshot(challenge), targets: baseTargets(challenge) };
 }
 
 export function validateChallengeInput(input, today) {

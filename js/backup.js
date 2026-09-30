@@ -105,6 +105,11 @@ function isObject(x) {
 
 const STEP_PHOTO_VALUES = new Set(['none', 'optional', 'required']);
 const STEP_NOTE_VALUES = new Set(['none', 'optional']);
+const STEP_TYPE_VALUES = new Set(['food', 'workout', 'steps', 'water', 'body', 'sleep']);
+const GOAL_DIR_VALUES = new Set(['atLeast', 'atMost', 'near']);
+const MACRO_KEY_VALUES = new Set(['protein', 'carbs', 'fat', 'fiber']);
+const CHALLENGE_CATEGORY_VALUES = new Set(['custom', 'fitness']);
+const PROFILE_NUMERIC_FIELDS = ['age', 'heightCm', 'startWeightKg', 'targetWeightKg'];
 
 // A step's `number` field is either null or an object describing a numeric
 // input (weight, reps, ...): { label: string, unit: string, required: boolean }.
@@ -114,10 +119,34 @@ function isValidNumberField(n) {
   return typeof n.label === 'string' && typeof n.unit === 'string' && typeof n.required === 'boolean';
 }
 
+// A step's `goal` field (fitness challenges — see js/fitness.js) is either
+// null/missing or { target: finite number, dir: one of GOAL_DIR_VALUES }.
+function isValidGoal(g) {
+  if (g === null || g === undefined) return true;
+  if (!isObject(g)) return false;
+  if (typeof g.target !== 'number' || !Number.isFinite(g.target)) return false;
+  if (!GOAL_DIR_VALUES.has(g.dir)) return false;
+  return true;
+}
+
+// A food step's `macros` (see js/fitness.js's macroTargets / docs §9) is
+// either null/missing or an object whose keys are a subset of MACRO_KEYS,
+// each value a goal-shaped { target: finite number, dir }. Meals/entries
+// carrying macro grams aren't deeply validated, same as everything else
+// under `meals`/`days` — only the step's own target shape is checked here.
+function isValidStepMacros(m) {
+  if (m === null || m === undefined) return true;
+  if (!isObject(m)) return false;
+  return Object.keys(m).every((k) => MACRO_KEY_VALUES.has(k) && isValidGoal(m[k]) && m[k] !== null);
+}
+
 // Matches exactly the shape migrate.js and js/ui/stepEditor.js produce (see
 // BODY_STEP/migrateStep and doSave): id/name are strings, photo/note are one
 // of a small fixed set of values (never missing — both migration paths and
 // the step editor always set them), and number is null or a well-shaped object.
+// `type` and `goal` are additive fitness-challenge fields; both are optional
+// and a plain custom step never has either. `macros` is additive too (food
+// steps only).
 function isValidStep(s) {
   if (!isObject(s)) return false;
   if (typeof s.id !== 'string' || s.id.length === 0) return false;
@@ -126,7 +155,24 @@ function isValidStep(s) {
   if (!STEP_PHOTO_VALUES.has(s.photo)) return false;
   if (!STEP_NOTE_VALUES.has(s.note)) return false;
   if (!isValidNumberField(s.number)) return false;
+  if ('type' in s && !STEP_TYPE_VALUES.has(s.type)) return false;
+  if ('goal' in s && !isValidGoal(s.goal)) return false;
+  if ('macros' in s && !isValidStepMacros(s.macros)) return false;
   return true;
+}
+
+// A fitness challenge's profile: an object whose numeric fields (age,
+// height, current/target weight) are all finite numbers. sex/activity/aim
+// aren't checked further here — an unrecognised value there just falls back
+// to a default in js/fitness.js rather than crashing anything. `schedule`
+// (docs §9's meal schedule, which replaces the old mealsPerDay) is additive
+// and loosely accepted the same way: not deeply validated here — a
+// malformed one just falls back to a fresh Regular schedule the next time
+// js/mealPlan.js's scheduleOf reads it, rather than blocking the whole
+// restore.
+function isValidProfile(p) {
+  if (!isObject(p)) return false;
+  return PROFILE_NUMERIC_FIELDS.every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]));
 }
 
 // Rejects anything that would let a crafted backup smuggle a non-numeric
@@ -140,6 +186,14 @@ function isValidChallenge(c) {
   if (!Number.isInteger(c.totalDays) || c.totalDays < 1 || c.totalDays > 1000) return false;
   if (!Number.isInteger(c.weeklyTarget) || c.weeklyTarget < 1 || c.weeklyTarget > 7) return false;
   if (!Array.isArray(c.steps) || !c.steps.every(isValidStep)) return false;
+  if ('category' in c && !CHALLENGE_CATEGORY_VALUES.has(c.category)) return false;
+  if ('profile' in c && c.profile !== null && !isValidProfile(c.profile)) return false;
+  // mealPlan/bodyCheck (see docs/superpowers/plans/2026-09-30-meal-suggestions.md
+  // §6) aren't deeply validated — same as meals/entries elsewhere — just
+  // loosely shape-checked as an object or null, so a crafted backup can't
+  // smuggle in a primitive that crashes the meal-plan/body-check UI.
+  if ('mealPlan' in c && c.mealPlan !== null && !isObject(c.mealPlan)) return false;
+  if ('bodyCheck' in c && c.bodyCheck !== null && !isObject(c.bodyCheck)) return false;
   return true;
 }
 
@@ -160,6 +214,11 @@ export function validateV2(b) {
     // steps must be a plain object (not null, not an array) — loadAll/reevaluate
     // iterate it with Object.entries/Object.values and crash on anything else.
     if (!isObject(d.steps)) bad();
+    // A food step entry's `meals` (logged) and `planned` (docs §9's
+    // placeholders) aren't deeply validated, same as everywhere else under
+    // `steps` — js/ui/today.js only ever reads them defensively
+    // (Array.isArray guards), so a malformed one just renders as empty
+    // rather than blocking the whole restore.
   }
   for (const p of b.photos) {
     if (!isObject(p) || typeof p.id !== 'string' || p.id.length === 0) bad();

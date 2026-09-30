@@ -16,6 +16,7 @@ import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 import { renderSummary } from './ui/summary.js';
 import { renderStats } from './ui/stats.js';
+import { consumeAuthRedirect, autoConnectIfNeeded, onAuthChange } from './googleAuth.js';
 
 const appEl = document.getElementById('app');
 const tabbarEl = document.getElementById('tabbar');
@@ -216,6 +217,7 @@ async function render() {
 
 window.addEventListener('hashchange', () => scheduleRender());
 store.onChange(() => scheduleRender());
+onAuthChange(() => scheduleRender());
 
 // ---------- boot ----------
 
@@ -237,7 +239,10 @@ function renderBootError(err) {
 
 async function boot() {
   try {
-    if (new URLSearchParams(location.search).has('mock')) {
+    consumeAuthRedirect();
+    const isMock = new URLSearchParams(location.search).has('mock');
+    if (!isMock && autoConnectIfNeeded()) return;
+    if (isMock) {
       const mock = await import('./dev/mock.js');
       if (mock.isDevHost()) {
         await mock.seedMock(store.today());

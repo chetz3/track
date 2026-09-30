@@ -21,6 +21,7 @@ import * as store from '../store.js';
 import { esc, hydratePhotos } from './dom.js';
 import { collectNumberSeries, trendDomain, ringStats, numberSummary } from '../chartMath.js';
 import { buildPhotoProgress } from '../summaryModel.js';
+import { isFoodStep, mealsTotal, mealsMacros, macroDotLine } from '../foodLogic.js';
 
 // ---------- resize handling (module-level, registered once) ----------
 
@@ -85,6 +86,15 @@ function summaryLineHtml(s) {
   if (t.diff != null) parts.push(`Change ${t.diff > 0 ? '+' : t.diff < 0 ? '−' : ''}${Math.abs(t.diff)}${unit}`);
   if (t.avg != null) parts.push(`Average ${t.avg}${unit}`);
   return parts.length ? `<p class="section-footer">${esc(parts.join(' · '))}</p>` : '';
+}
+
+// "Today · N kcal" above a food step's chart, since the trend chart only
+// plots days that already have a saved value and today's meals may still be
+// in progress. Shows 0 rather than omitting the line when there are none.
+function todayFoodLineHtml(step, daysMap) {
+  if (!isFoodStep(step)) return '';
+  const meals = daysMap[store.today()]?.steps?.[step.id]?.meals;
+  return `<p class="section-footer">Today · ${esc(mealsTotal(meals))} kcal · ${esc(macroDotLine(mealsMacros(meals)))}</p>`;
 }
 
 // Returns '' (section omitted entirely) when the challenge has no
@@ -207,6 +217,7 @@ export async function renderStats(root) {
       <div class="section">
         <p class="section-header">${esc(s.step.name)} — ${esc(s.step.number.label)}${unitSuffix}</p>
         ${summaryLineHtml(s)}
+        ${todayFoodLineHtml(s.step, daysMap)}
         <div class="group trend-group" data-trend-index="${i}"></div>
       </div>
     `;
