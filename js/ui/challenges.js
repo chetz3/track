@@ -24,7 +24,8 @@ import { connect, disconnect, getAuthState, clearAuthError } from '../googleAuth
 import { getGeminiKey, setGeminiKey, clearGeminiKey } from '../gemini.js';
 import { defaultSlots, ifSlots, scheduleOf } from '../mealPlan.js';
 
-const GEMINI_KEY_RE = /^[A-Za-z0-9_-]{20,}$/;
+// Classic keys look like "AIza…"; newer AI Studio keys like "AQ.Ab8R…" (with a dot).
+const GEMINI_KEY_RE = /^[A-Za-z0-9._-]{20,}$/;
 
 const LAST_EXPORT_KEY = 'tracker:lastExportAt';
 
@@ -189,7 +190,7 @@ function geminiSectionHtml() {
     <ol class="section-footer gemini-steps">
       <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and sign in with Google.</li>
       <li>Tap <strong>Create API key</strong> (pick any project, or let it create one).</li>
-      <li>Copy the key (starts with <code>AIza</code>), paste it above, and tap <strong>Save</strong>.</li>
+      <li>Copy the key (starts with <code>AIza</code> or <code>AQ.</code>), paste it above, and tap <strong>Save</strong>.</li>
     </ol>
     <p class="section-footer">Your key stays on this device only and uses your own free Gemini quota.</p>
   </div>`;
