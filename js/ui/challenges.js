@@ -710,7 +710,7 @@ function buildFormHtml({ draft, error, isNew, challenge, saving }) {
     <h2 class="section-header">Steps</h2>
     <div class="group">
       ${draft.steps.map(stepRowHtml).join('')}
-      <div class="row" data-role="add-step"><span class="add-step-label">Add step</span></div>
+      ${isNew ? '<div class="row" data-role="add-step"><span class="add-step-label">Add step</span></div>' : ''}
     </div>
   </div>`;
 
@@ -966,6 +966,8 @@ function wireFormDelegation(root) {
           formDraft.steps = formDraft.steps.filter((s) => s.id !== id);
           current.rerender();
         },
+        // An existing challenge's steps are fixed; only their goals change.
+        { goalsOnly: !current.isNew },
       );
       return;
     }

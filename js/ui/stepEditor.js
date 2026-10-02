@@ -154,6 +154,28 @@ function macroRowsHtml(draft) {
   </div>`).join('');
 }
 
+// Goals-only body for a step of an existing challenge: the step itself
+// (type, name, mandatory, photo/number/note) is fixed once the challenge
+// exists — only its targets can change.
+function goalsOnlyBodyHtml(draft, error) {
+  const isCustom = draft.type === 'regular';
+  let rowsHtml;
+  if (draft.type === 'body') rowsHtml = typedGoalRowHtml(draft);
+  else if (isCustom) rowsHtml = draft.number ? goalSubRowHtml(draft) : '';
+  else rowsHtml = `${typedGoalRowHtml(draft)}${macroRowsHtml(draft)}`;
+  const emptyHtml = rowsHtml ? '' : '<div class="section-footer">This step has no number, so it has no goal to edit.</div>';
+  const errorHtml = error ? `<div class="section-footer error">${esc(error)}</div>` : '';
+  return `<div class="group">
+    <div class="row"><span class="field-label">Step</span><span class="row-value">${esc(draft.name)}</span></div>
+    ${rowsHtml}
+  </div>
+  ${emptyHtml}${errorHtml}
+  <div class="btn-pair">
+    <button type="button" class="btn btn-secondary" data-role="cancel">Cancel</button>
+    <button type="button" class="btn btn-primary" data-role="save">Save</button>
+  </div>`;
+}
+
 function bodyHtml(draft, error, editing) {
   const isCustom = draft.type === 'regular';
   const isFood = draft.type === 'food';
@@ -215,7 +237,10 @@ function buildMacrosFromDraft(macroTargets) {
   return any ? macros : null;
 }
 
-export function openStepEditor(step, onSave, onDelete) {
+// `opts.goalsOnly`: editing a step of an existing challenge — only its
+// goal/target fields are shown and saved (see goalsOnlyBodyHtml).
+export function openStepEditor(step, onSave, onDelete, opts = {}) {
+  const goalsOnly = !!(opts.goalsOnly && step);
   const editing = !!step;
   const draft = editing ? cloneStep(step) : defaultStep();
   let error = '';
@@ -226,11 +251,11 @@ export function openStepEditor(step, onSave, onDelete) {
   const originalGoal = editing ? (step.goal || null) : null;
   const originalMacros = editing && originalType === 'food' ? (step.macros || null) : null;
 
-  const render = () => `<div id="step-editor-root">${bodyHtml(draft, error, editing)}</div>`;
+  const render = () => `<div id="step-editor-root">${goalsOnly ? goalsOnlyBodyHtml(draft, error) : bodyHtml(draft, error, editing)}</div>`;
   let currentSheetEl = null;
 
   const close = openSheet({
-    title: editing ? 'Edit step' : 'New step',
+    title: goalsOnly ? 'Edit goal' : editing ? 'Edit step' : 'New step',
     bodyHtml: render(),
     onMount: (sheetEl, closeFn) => wire(sheetEl, closeFn),
   });
@@ -289,7 +314,14 @@ export function openStepEditor(step, onSave, onDelete) {
       const macros = draft.type === 'food' ? buildMacrosFromDraft(draft.macroTargets) : undefined;
       finalStep = makeTypedStep(draft.type, { id: draft.id, name, mandatory: draft.mandatory, goal: { target, dir }, macros });
     }
-    onSave(finalStep);
+    if (goalsOnly) {
+      // Only the targets change; everything else about the step is kept.
+      const updated = { ...step, goal: finalStep.goal ?? null };
+      if (step.type === 'food') updated.macros = finalStep.macros ?? null;
+      onSave(updated);
+    } else {
+      onSave(finalStep);
+    }
     closeFn();
   }
 
