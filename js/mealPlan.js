@@ -7,7 +7,7 @@
 // js/ui/today.js.
 
 import { addDays } from './rules.js';
-import { mealsTotal } from './foodLogic.js';
+import { mealsTotal, mealsMacros } from './foodLogic.js';
 import { latestBodyWeightKg } from './fitness.js';
 
 // ---------- canSuggest ----------
@@ -88,7 +88,7 @@ function mealTuples(meals) {
 // today's food targets, the last 7 days (today inclusive) of meals/workout/
 // steps/water/sleep, and the body check text. `today` is the date the
 // suggestion is being made from (the resulting plan is for the day after).
-export function buildSuggestionInput(challenge, daysMap, today) {
+export function buildSuggestionInput(challenge, daysMap, today, pref) {
   const profile = challenge.profile || {};
   const foodStep = findStep(challenge, 'food');
   const workoutStep = findStep(challenge, 'workout');
@@ -124,7 +124,27 @@ export function buildSuggestionInput(challenge, daysMap, today) {
     });
   }
 
+  // Yesterday's food gaps + the unique dishes of the last 7 days (style
+  // reference only — the prompt forbids repeating yesterday's dishes).
+  const yesterday = addDays(today, -1);
+  const yEntry = foodStep && daysMap && daysMap[yesterday] && daysMap[yesterday].steps && daysMap[yesterday].steps[foodStep.id];
+  const yMeals = yEntry && Array.isArray(yEntry.meals) ? yEntry.meals : [];
+  const seen = new Set();
+  const recentDishes = [];
+  for (const d of last7Days) {
+    for (const t of d.meals) {
+      const key = String(t[0]).trim().toLowerCase();
+      if (key && !seen.has(key)) { seen.add(key); recentDishes.push(t[0]); }
+    }
+  }
+
   return {
+    pref: pref || null,
+    yesterday: {
+      dishes: yMeals.map((m) => m.dish || '').filter(Boolean),
+      gaps: dayGaps(yEntry, foodStep, targets ? targets.kcal : null),
+    },
+    recentDishes,
     profile: {
       sex: profile.sex || null,
       age: Number.isFinite(profile.age) ? profile.age : null,
@@ -145,6 +165,42 @@ export function buildSuggestionInput(challenge, daysMap, today) {
     last7Days,
     bodyCheck: bodyCheckText(challenge, daysMap),
   };
+}
+
+// ---------- diet preference (meal suggest v2 §2) ----------
+
+// The choices offered in the suggest sheet for each profile.diet, default
+// first. `fixed` means there's nothing to choose (no selector shown).
+// 'veg' is what the profile stores for Vegetarian.
+export function prefOptions(diet) {
+  if (diet === 'nonveg') return { options: [{ value: 'mix', label: 'Mix' }, { value: 'nonveg', label: 'Non-veg' }, { value: 'veg', label: 'Veg' }], default: 'mix', fixed: false };
+  if (diet === 'eggetarian') return { options: [{ value: 'egg', label: 'Egg' }, { value: 'veg', label: 'Veg' }], default: 'egg', fixed: false };
+  if (diet === 'vegan') return { options: [{ value: 'vegan', label: 'Vegan' }], default: 'vegan', fixed: true };
+  return { options: [{ value: 'veg', label: 'Veg' }], default: 'veg', fixed: true };
+}
+
+// ---------- yesterday's gaps (meal suggest v2 §3) ----------
+
+const GAP_KEYS = [['kcal', 'atMost'], ['protein', 'atLeast'], ['carbs', 'atMost'], ['fat', 'atMost'], ['fiber', 'atLeast']];
+
+// [{ key, target, actual, status }] for one day's food entry. atLeast goals
+// (protein, fiber) are 'short' under 90% of target; atMost goals (kcal,
+// carbs, fat) are 'over' above target. Keys without a target are skipped.
+export function dayGaps(entry, foodStep, kcalTarget) {
+  const meals = entry && Array.isArray(entry.meals) ? entry.meals : [];
+  const macros = mealsMacros(meals);
+  const actuals = { kcal: mealsTotal(meals), ...macros };
+  const gaps = [];
+  for (const [key, dir] of GAP_KEYS) {
+    const target = key === 'kcal' ? kcalTarget : (foodStep && foodStep.macros && foodStep.macros[key] ? foodStep.macros[key].target : null);
+    if (!Number.isFinite(target) || target <= 0) continue;
+    const actual = actuals[key];
+    let status = 'ok';
+    if (dir === 'atLeast' && actual < target * 0.9) status = 'short';
+    if (dir === 'atMost' && actual > target) status = 'over';
+    gaps.push({ key, target, actual, status });
+  }
+  return gaps;
 }
 
 // ---------- meal schedule (docs §9) ----------
@@ -281,6 +337,58 @@ function clampInt(n, max) {
   return Math.min(max, Math.max(0, rounded));
 }
 
+export const INGREDIENT_UNITS = ['g', 'ml', 'pcs', 'tbsp', 'tsp', 'cup', 'bunch'];
+export const INGREDIENT_CATEGORIES = [
+  ['vegetables', 'Vegetables'], ['fruits', 'Fruits'], ['dairy', 'Dairy'], ['meat_fish_eggs', 'Meat, fish & eggs'],
+  ['grains', 'Grains'], ['pulses', 'Pulses'], ['spices_oils', 'Spices & oils'], ['other', 'Other'],
+];
+
+// Keeps well-formed ingredients (name + positive qty), clamps qty, and
+// falls back to unit 'pcs' / category 'other' for unknown values. Anything
+// that isn't an array (an old saved plan) gives [].
+function parseIngredients(list) {
+  if (!Array.isArray(list)) return [];
+  const cats = new Set(INGREDIENT_CATEGORIES.map((c) => c[0]));
+  const out = [];
+  for (const i of list.slice(0, 20)) {
+    if (!i || typeof i.name !== 'string' || !i.name.trim()) continue;
+    const qty = Math.round(Number(i.qty) * 10) / 10;
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    out.push({
+      name: i.name.trim().slice(0, 60),
+      qty: Math.min(5000, qty),
+      unit: INGREDIENT_UNITS.includes(i.unit) ? i.unit : 'pcs',
+      category: cats.has(i.category) ? i.category : 'other',
+    });
+  }
+  return out;
+}
+
+// Stable key for an aggregated grocery item (also what challenge.mealPlan.have stores).
+export function groceryKey(name, unit) {
+  return `${String(name).trim().toLowerCase()}|${unit}`;
+}
+
+// Sums ingredients across meals by lower-cased name + unit (different units
+// stay separate), grouped by category in a fixed order; empty categories are dropped.
+export function groceryList(meals) {
+  const byKey = new Map();
+  for (const m of Array.isArray(meals) ? meals : []) {
+    for (const i of (m && Array.isArray(m.ingredients) ? m.ingredients : [])) {
+      const key = groceryKey(i.name, i.unit);
+      const cur = byKey.get(key);
+      if (cur) cur.qty += i.qty;
+      else byKey.set(key, { name: i.name, qty: i.qty, unit: i.unit, category: i.category });
+    }
+  }
+  return INGREDIENT_CATEGORIES.map(([category, label]) => ({
+    category,
+    label,
+    items: [...byKey.values()].filter((i) => i.category === category)
+      .map((i) => ({ name: i.name, qty: Math.round(i.qty * 10) / 10, unit: i.unit })),
+  })).filter((g) => g.items.length);
+}
+
 // Validates and normalises the JSON Gemini returns for a meal suggestion.
 // Never trusts a network response blindly — same spirit as
 // js/foodLogic.js's parseCalorieResult. Throws on a shape that doesn't match.
@@ -302,10 +410,11 @@ export function parseMealPlan(json) {
       fat: clampInt(m.fat_g, 500),
       fiber: clampInt(m.fiber_g, 500),
       swapFor: typeof m.swap_for === 'string' ? m.swap_for : '',
+      ingredients: parseIngredients(m.ingredients),
     };
   });
   const strings = (v) => (Array.isArray(v) ? v.filter((s) => typeof s === 'string' && s.trim()).slice(0, 3) : []);
-  return { meals, why: strings(json.why), tips: strings(json.tips) };
+  return { meals, why: strings(json.why), tips: strings(json.tips), fixes: strings(json.fixes) };
 }
 
 // Sum of a plan's meals, each key rounded to an integer — mirrors

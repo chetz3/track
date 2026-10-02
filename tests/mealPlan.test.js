@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canSuggest, buildSuggestionInput, parseMealPlan, planTotals, kcalWarning, bodyCheckText, defaultSlots, ifSlots, eatingWindow, windowStatus, scheduleOf, placeholderStatus } from '../js/mealPlan.js';
+import { canSuggest, buildSuggestionInput, parseMealPlan, planTotals, kcalWarning, bodyCheckText, defaultSlots, ifSlots, eatingWindow, windowStatus, scheduleOf, placeholderStatus, dayGaps, groceryList, prefOptions, groceryKey } from '../js/mealPlan.js';
 import { addDays } from '../js/rules.js';
 import { presetSteps } from '../js/fitness.js';
 
@@ -163,7 +163,7 @@ test('parseMealPlan: valid input is normalised, clamped and capped at 3 why/tips
   };
   const plan = parseMealPlan(json);
   assert.equal(plan.meals.length, 2);
-  assert.deepEqual(plan.meals[0], { slot: 'Breakfast', dish: 'Idli sambar', portion: '3 idlis', kcal: 300, protein: 10, carbs: 55, fat: 5, fiber: 6, swapFor: 'Ragi idli' });
+  assert.deepEqual(plan.meals[0], { slot: 'Breakfast', dish: 'Idli sambar', portion: '3 idlis', kcal: 300, protein: 10, carbs: 55, fat: 5, fiber: 6, swapFor: 'Ragi idli', ingredients: [] });
   assert.equal(plan.meals[1].swapFor, '');
   assert.equal(plan.why.length, 3);
   assert.equal(plan.tips.length, 3);
@@ -341,4 +341,80 @@ test('placeholderStatus: ignores a meal linked to a different placeholder', () =
   const planned = { id: 'p1' };
   const meals = [{ id: 'm1', plannedId: 'p2', calories: 300 }];
   assert.equal(placeholderStatus(planned, meals).status, 'planned');
+});
+
+// --- meal suggest v2 ---
+
+test('dayGaps: short / over / ok', () => {
+  const step = { macros: { protein: { target: 100, dir: 'atLeast' }, fiber: { target: 30, dir: 'atLeast' }, carbs: { target: 200, dir: 'atMost' }, fat: { target: 60, dir: 'atMost' } } };
+  const entry = { meals: [meal('A', 2100, { protein: 70, carbs: 150, fat: 70, fiber: 28 })] };
+  const gaps = dayGaps(entry, step, 2000);
+  const by = Object.fromEntries(gaps.map((g) => [g.key, g]));
+  assert.equal(by.kcal.status, 'over');
+  assert.equal(by.protein.status, 'short');
+  assert.equal(by.carbs.status, 'ok');
+  assert.equal(by.fat.status, 'over');
+  assert.equal(by.fiber.status, 'ok'); // 28 >= 90% of 30
+  assert.equal(by.protein.actual, 70);
+  assert.equal(by.protein.target, 100);
+});
+
+test('dayGaps: no targets gives no gaps', () => {
+  assert.deepEqual(dayGaps({ meals: [] }, { macros: null }, null), []);
+  assert.deepEqual(dayGaps(undefined, null, undefined), []);
+});
+
+test('groceryList: sums same item, keeps units separate, fixed category order', () => {
+  const meals = [
+    { ingredients: [{ name: 'Chicken breast', qty: 150, unit: 'g', category: 'meat_fish_eggs' }, { name: 'Onion', qty: 1, unit: 'pcs', category: 'vegetables' }] },
+    { ingredients: [{ name: 'chicken breast', qty: 150, unit: 'g', category: 'meat_fish_eggs' }, { name: 'Onion', qty: 50, unit: 'g', category: 'vegetables' }, { name: 'Rice', qty: 80, unit: 'g', category: 'grains' }] },
+  ];
+  const list = groceryList(meals);
+  assert.deepEqual(list.map((g) => g.category), ['vegetables', 'meat_fish_eggs', 'grains']);
+  assert.deepEqual(list[1].items, [{ name: 'Chicken breast', qty: 300, unit: 'g' }]);
+  assert.equal(list[0].items.length, 2);
+  assert.equal(groceryKey(' Onion ', 'g'), 'onion|g');
+  assert.deepEqual(groceryList([{}]), []);
+});
+
+test('parseMealPlan: keeps and clamps ingredients, old plans get []', () => {
+  const base = { slot: 'Lunch', dish: 'Dal', portion: '1 bowl', kcal: 400, protein_g: 20, carbs_g: 50, fat_g: 8, fiber_g: 9 };
+  const plan = parseMealPlan({
+    meals: [{ ...base, ingredients: [{ name: 'Toor dal', qty: 60, unit: 'g', category: 'pulses' }, { name: 'Salt', qty: 99999, unit: 'weird', category: 'x' }, { name: '', qty: 1, unit: 'g' }, { name: 'Bad', qty: -1, unit: 'g' }] }, base],
+    why: [], tips: [], fixes: ['Protein: 70 → 150 g', 'b', 'c', 'd'],
+  });
+  assert.deepEqual(plan.meals[0].ingredients[0], { name: 'Toor dal', qty: 60, unit: 'g', category: 'pulses' });
+  assert.equal(plan.meals[0].ingredients.length, 2);
+  assert.equal(plan.meals[0].ingredients[1].qty, 5000);
+  assert.equal(plan.meals[0].ingredients[1].unit, 'pcs');
+  assert.equal(plan.meals[0].ingredients[1].category, 'other');
+  assert.deepEqual(plan.meals[1].ingredients, []);
+  assert.equal(plan.fixes.length, 3);
+  assert.deepEqual(parseMealPlan({ meals: [] }).fixes, []);
+});
+
+test('prefOptions: choices and default per diet', () => {
+  assert.deepEqual(prefOptions('nonveg').options.map((o) => o.value), ['mix', 'nonveg', 'veg']);
+  assert.equal(prefOptions('nonveg').default, 'mix');
+  assert.deepEqual(prefOptions('eggetarian').options.map((o) => o.value), ['egg', 'veg']);
+  assert.equal(prefOptions('eggetarian').default, 'egg');
+  assert.equal(prefOptions('veg').fixed, true);
+  assert.equal(prefOptions('veg').default, 'veg');
+  assert.equal(prefOptions('vegan').default, 'vegan');
+  assert.equal(prefOptions('vegan').fixed, true);
+});
+
+test('buildSuggestionInput: yesterday gaps/dishes and recentDishes', () => {
+  const challenge = fitnessChallenge();
+  const foodStepId = challenge.steps.find((s) => s.type === 'food').id;
+  const y = addDays(TODAY, -1);
+  const daysMap = {
+    [y]: dayWithMeals(y, foodStepId, [meal('Idli', 200, { protein: 6, carbs: 40, fat: 2, fiber: 3 })]),
+    [TODAY]: dayWithMeals(TODAY, foodStepId, [meal('idli', 200, {}), meal('Dosa', 150, {})]),
+  };
+  const input = buildSuggestionInput(challenge, daysMap, TODAY, 'veg');
+  assert.equal(input.pref, 'veg');
+  assert.deepEqual(input.yesterday.dishes, ['Idli']);
+  assert.ok(input.yesterday.gaps.find((g) => g.key === 'protein' && g.status === 'short'));
+  assert.deepEqual(input.recentDishes, ['Idli', 'Dosa']);
 });

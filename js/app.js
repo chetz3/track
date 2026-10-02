@@ -249,6 +249,7 @@ async function boot() {
       if (mock.isDevHost()) {
         await mock.seedMock(store.today());
         localStorage.setItem('tracker:selected', 'c-mock-fit');
+        try { localStorage.setItem('tracker:mockGemini', '1'); } catch { /* storage blocked */ }
         history.replaceState(null, '', location.pathname + '#/today');
       }
     }
