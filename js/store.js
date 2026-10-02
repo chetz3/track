@@ -278,7 +278,9 @@ export async function updateChallenge(challenge) {
   // createdAt — so writing `challenge` as-is would silently drop it from the
   // stored record. Preserve whatever the existing record has.
   const existing = state.challenges.find((c) => c.id === challenge.id);
-  const toStore = { ...challenge, createdAt: (existing && existing.createdAt) ?? challenge.createdAt };
+  // Merge onto the existing record so fields the form doesn't carry
+  // (mealPlan, bodyCheck) survive an edit.
+  const toStore = { ...(existing || {}), ...challenge, createdAt: (existing && existing.createdAt) ?? challenge.createdAt };
 
   await db.put('challenges', toStore);
 
