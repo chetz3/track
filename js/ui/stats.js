@@ -256,11 +256,18 @@ export async function renderStats(root) {
 
   for (const [i, s] of series.entries()) {
     const mount = root.querySelector(`[data-trend-index="${i}"]`);
-    if (mount) renderTrendChart(mount, { title: s.step.name, unit: s.step.number.unit, points: s.points });
+    if (mount) renderTrendChart(mount, { title: s.step.name, unit: s.step.number.unit, points: s.points, color: stepColorVar(s.step) });
   }
 
   wirePhotoProgress(root);
   await hydratePhotos(root);
+}
+
+// Visual only: the CSS colour token for a step's type (chart line, area, dots).
+function stepColorVar(step) {
+  const t = isFoodStep(step) ? 'food' : (step.type || 'custom');
+  const known = ['food', 'workout', 'steps', 'water', 'body', 'sleep'];
+  return `var(--c-${known.includes(t) ? t : 'custom'})`;
 }
 
 // ---------- progress ring ----------
@@ -275,7 +282,7 @@ export function renderProgressRing(el, s) {
   const tip = d3.select(el).append('div').attr('class', 'chart-tip').style('opacity', 0).style('margin', '8px auto 0');
   const rings = [
     { label: `Day ${s.day} of ${s.totalDays}`, frac: s.totalDays ? s.day / s.totalDays : 0, r: size / 2 - stroke / 2, color: 'var(--accent)' },
-    { label: `${s.weeksPassed} of ${s.totalWeeks} weeks passed`, frac: s.totalWeeks ? s.weeksPassed / s.totalWeeks : 0, r: size / 2 - stroke * 1.5 - gap, color: 'var(--green)' },
+    { label: `${s.weeksPassed} of ${s.totalWeeks} weeks passed`, frac: s.totalWeeks ? s.weeksPassed / s.totalWeeks : 0, r: size / 2 - stroke * 1.5 - gap, color: 'var(--green-fill)' },
   ];
   for (const ring of rings) {
     const arc = d3.arc().innerRadius(ring.r - stroke / 2).outerRadius(ring.r + stroke / 2).startAngle(0).cornerRadius(stroke / 2);
@@ -295,7 +302,7 @@ export function renderProgressRing(el, s) {
 
 // ---------- trend chart ----------
 
-export function renderTrendChart(el, { title, unit, points }) {
+export function renderTrendChart(el, { title, unit, points, color = 'var(--accent)' }) {
   const d3 = window.d3;
   if (points.length === 0) { el.innerHTML = `<p class="section-footer">No ${esc(title)} entries yet.</p>`; return; }
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -316,8 +323,8 @@ export function renderTrendChart(el, { title, unit, points }) {
   const svg = d3.select(el).append('svg').attr('viewBox', `0 0 ${width} ${height}`).attr('class', 'trend').style('touch-action', 'pan-y');
   const defs = svg.append('defs');
   const grad = defs.append('linearGradient').attr('id', `g${uid}`).attr('x1', 0).attr('x2', 0).attr('y1', 0).attr('y2', 1);
-  grad.append('stop').attr('offset', '0%').attr('stop-color', '#ff9f0a').attr('stop-opacity', 0.35);
-  grad.append('stop').attr('offset', '100%').attr('stop-color', '#ff9f0a').attr('stop-opacity', 0);
+  grad.append('stop').attr('offset', '0%').style('stop-color', color).attr('stop-opacity', 0.35);
+  grad.append('stop').attr('offset', '100%').style('stop-color', color).attr('stop-opacity', 0);
   defs.append('clipPath').attr('id', `c${uid}`).append('rect').attr('x', m.left).attr('y', 0).attr('width', width - m.left - m.right).attr('height', height);
   svg.append('g').attr('class', 'axis axis-y').attr('transform', `translate(${m.left},0)`)
     .call(d3.axisLeft(y).ticks(4).tickSize(-(width - m.left - m.right)))
@@ -325,11 +332,11 @@ export function renderTrendChart(el, { title, unit, points }) {
   const xAxis = svg.append('g').attr('class', 'axis axis-x').attr('transform', `translate(0,${height - m.bottom})`);
   const plot = svg.append('g').attr('clip-path', `url(#c${uid})`);
   const area = plot.append('path').attr('fill', `url(#g${uid})`);
-  const line = plot.append('path').attr('fill', 'none').attr('stroke', '#ff9f0a').attr('stroke-width', 2.5).attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round');
-  const dots = plot.selectAll('circle.pt').data(data).join('circle').attr('class', 'pt').attr('r', 3.5).attr('fill', '#ff9f0a');
+  const line = plot.append('path').attr('fill', 'none').style('stroke', color).attr('stroke-width', 2.5).attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round');
+  const dots = plot.selectAll('circle.pt').data(data).join('circle').attr('class', 'pt').attr('r', 3.5).style('fill', color);
   const focus = svg.append('g').style('opacity', 0).style('pointer-events', 'none');
-  focus.append('line').attr('y1', m.top).attr('y2', height - m.bottom).attr('stroke', 'rgba(255,255,255,.25)');
-  const focusDot = focus.append('circle').attr('r', 6).attr('fill', '#ff9f0a').attr('stroke', '#000').attr('stroke-width', 2);
+  focus.append('line').attr('y1', m.top).attr('y2', height - m.bottom).style('stroke', 'var(--grid-strong)');
+  const focusDot = focus.append('circle').attr('r', 6).style('fill', color).style('stroke', 'var(--grouped)').attr('stroke-width', 2);
   const tip = d3.select(el).append('div').attr('class', 'chart-tip').style('opacity', 0);
   let x = x0;
   const draw = () => {

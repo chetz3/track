@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v32';
+const CACHE_NAME = 'tracker-shell-v35';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -22,6 +22,7 @@ const SHELL_FILES = [
   './js/fitness.js',
   './js/mealPlan.js',
   './js/ui/dom.js',
+  './js/ui/fx.js',
   './js/ui/sheet.js',
   './js/ui/today.js',
   './js/ui/camera.js',
@@ -33,6 +34,7 @@ const SHELL_FILES = [
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './icons/logo.svg',
   './vendor/d3.v7.min.js',
 ];
 

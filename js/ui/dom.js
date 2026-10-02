@@ -74,3 +74,16 @@ export function revokePhotosIn(scope) {
 export function readFileAsPhoto(inputEl) {
   return (inputEl && inputEl.files && inputEl.files[0]) || null;
 }
+
+// Visual only: inline SVG icon from the sprite in index.html. Decorative
+// (aria-hidden) because it is always rendered beside visible text or inside a
+// control that already carries its own label.
+export function icon(name, cls = '') {
+  return `<svg class="icon${cls ? ' ' + cls : ''}" aria-hidden="true" focusable="false"><use href="#i-${name}"/></svg>`;
+}
+
+// Visual only: the colour/icon family for a step (chip, chart colour).
+export function stepKind(step) {
+  const t = step && step.type;
+  return ['food', 'workout', 'steps', 'water', 'body', 'sleep'].includes(t) ? t : 'custom';
+}
