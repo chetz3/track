@@ -14,7 +14,7 @@ import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macr
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
-import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus } from '../mealPlan.js';
+import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey } from '../mealPlan.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -373,19 +373,21 @@ function mealPlanSectionHtml(step, fieldCtx) {
   // which only a fitness challenge has — a food step added by hand to a
   // custom challenge has nowhere to set Diet, so it never shows this at all.
   if (!challenge || challenge.category !== 'fitness') return '';
+  // The "Today's plan" row (when a plan for today exists) sits above the
+  // Suggest button — it never replaces it.
   const plan = challenge.mealPlan;
-  if (plan && plan.forDate === fieldCtx.date) {
-    return `<div class="row chevron" data-role="open-meal-plan" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+  const planRowHtml = plan && plan.forDate === fieldCtx.date
+    ? `<div class="row chevron" data-role="open-meal-plan" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
       <span class="row-label">Today's plan</span>
-    </div>`;
-  }
+    </div>`
+    : '';
   const daysMap = store.state.days[fieldCtx.challengeId] || {};
   const hasDiet = !!(challenge.profile && challenge.profile.diet);
   const enough = canSuggest(daysMap, step.id, fieldCtx.date);
   const enabled = hasDiet && enough;
   const hint = !hasDiet ? 'Set Diet in the challenge profile to get suggestions.' : !enough ? 'Log 3 meals in a day to get suggestions.' : '';
   const hintHtml = hint ? `<div class="section-footer">${esc(hint)}</div>` : '';
-  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+  return `${planRowHtml}<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <button type="button" class="btn btn-secondary" style="width:100%" data-role="suggest-meals" data-step-id="${esc(step.id)}"${enabled ? '' : ' disabled'}>${icon('sparkles')}Suggest tomorrow's meals</button>
   </div>${hintHtml}`;
 }
@@ -1171,7 +1173,7 @@ export async function refreshBodyCheckIfDue(challenge, { force = false } = {}) {
 
 function planFromChallenge(challenge) {
   const plan = challenge.mealPlan;
-  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, forDate: plan.forDate } : null;
+  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes || [], have: plan.have || [], pref: plan.pref || null, forDate: plan.forDate } : null;
 }
 
 // "1480 / 1500 kcal · P 150 / 155 g …" (docs §1's totals-vs-targets line).
@@ -1224,7 +1226,45 @@ function linesHtml(title, lines) {
   </div>`;
 }
 
+// The pre-suggest preference picker (meal suggest v2 §2): a segmented control
+// for diets with a choice, plain text when there's only one.
+function prefPickerHtml(state) {
+  const { options, fixed } = prefOptions(state.diet);
+  if (fixed) return `<p class="section-footer">${esc(options[0].label)} only</p>`;
+  const inputs = options.map((o) =>
+    `<label><input type="radio" name="meal-pref" value="${esc(o.value)}" data-role="meal-pref" ${state.pref === o.value ? 'checked' : ''}><span>${esc(o.label)}</span></label>`
+  ).join('');
+  return `<div class="section"><h2 class="section-header">Meal preference</h2><div class="segmented">${inputs}</div></div>`;
+}
+
+// "Grocery list for <tomorrow>": rows grouped by category with a "have it"
+// switch each, plus Share list (checked items are left off the shared text).
+function groceryHtml(state) {
+  const groups = groceryList(state.meals);
+  if (!groups.length) return '';
+  const have = new Set(state.have);
+  const rows = groups.map((g) => `<div class="section">
+    <h2 class="section-header">${esc(g.label)}</h2>
+    <div class="group">${g.items.map((i) => {
+      const key = groceryKey(i.name, i.unit);
+      return `<label class="row"><span class="row-label">${esc(i.name)} · ${esc(i.qty)} ${esc(i.unit)}</span>
+        <input type="checkbox" class="switch" data-role="grocery-have" data-key="${esc(key)}" aria-label="Have ${esc(i.name)}" ${have.has(key) ? 'checked' : ''} /></label>`;
+    }).join('')}</div>
+  </div>`).join('');
+  return `<div class="section">
+    <h2 class="section-header">Grocery list for ${esc(formatDateLong(state.forDate))}</h2>
+    <p class="section-footer">Switch on what you already have.</p>
+  </div>${rows}
+  <button type="button" class="btn btn-secondary" data-role="grocery-share">Share list</button>
+  ${state.shareMsg ? `<p class="section-footer">${esc(state.shareMsg)}</p>` : ''}`;
+}
+
 function mealPlanBodyHtml(state) {
+  if (state.stage === 'pick' && !state.loading) {
+    return `${prefPickerHtml(state)}
+      <button type="button" class="btn btn-primary" data-role="meal-plan-go">Suggest</button>
+      <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Cancel</button>`;
+  }
   if (state.loading) {
     return `<p class="section-footer">Generating your plan…</p>`;
   }
@@ -1242,9 +1282,10 @@ function mealPlanBodyHtml(state) {
   return `<div class="group">${mealsHtml}</div>
     ${targetsHtml ? `<p class="section-footer">${esc(targetsHtml)}</p>` : ''}
     ${warningHtml}
-    ${linesHtml('Why this plan', state.why)}
+    ${state.fixes && state.fixes.length ? linesHtml('Fixes from yesterday', state.fixes) : linesHtml('Why this plan', state.why)}
     ${bodyNote ? `<p class="section-footer">${esc(bodyNote)}</p>` : ''}
     ${linesHtml('Tips', state.tips)}
+    ${groceryHtml(state)}
     <button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : 'Add all to tomorrow’s plan'}</button>
     ${addAllError}
     <div class="btn-pair">
@@ -1266,14 +1307,25 @@ function openMealPlanSheet(ctx, opts = {}) {
   if (!existing && !opts.generate) return;
 
   const daysMap = store.state.days[ctx.challengeId] || {};
-  const input = buildSuggestionInput(challenge, daysMap, ctx.date);
+  const dietChoices = prefOptions(challenge.profile && challenge.profile.diet);
+  const savedPref = existing && existing.pref;
+  const startPref = dietChoices.options.some((o) => o.value === savedPref) ? savedPref : dietChoices.default;
+  const input = buildSuggestionInput(challenge, daysMap, ctx.date, startPref);
   // The schedule whose slot times back-fill each added placeholder's `time`
   // (docs §9) — refreshed alongside everything else on "New ideas", via
   // runGenerate's freshInput below.
   let currentSchedule = input.profile.schedule;
 
   const state = {
-    loading: !!opts.generate,
+    // 'pick' = the preference chooser before calling Gemini (Suggest button
+    // path); anything else shows the plan / loading / error.
+    stage: opts.generate ? 'pick' : 'plan',
+    diet: challenge.profile && challenge.profile.diet,
+    pref: startPref,
+    fixes: existing ? existing.fixes : [],
+    have: existing ? existing.have : [],
+    shareMsg: '',
+    loading: false,
     busy: false,
     error: '',
     forDate: opts.generate ? opts.forDate : existing.forDate,
@@ -1297,7 +1349,7 @@ function openMealPlanSheet(ctx, opts = {}) {
   const close = openSheet({
     title: "Tomorrow's meal plan",
     bodyHtml: render(),
-    onMount: (el) => { sheetEl = el; wire(el); if (opts.generate) runGenerate(opts.avoidDishes); },
+    onMount: (el) => { sheetEl = el; wire(el); },
   });
 
   function rerenderSheet() {
@@ -1308,6 +1360,9 @@ function openMealPlanSheet(ctx, opts = {}) {
   async function runGenerate(avoidDishes) {
     state.busy = true;
     state.error = '';
+    // From the preference picker there's no plan yet, so show the loading
+    // view; "New ideas" keeps the old plan on screen (busy button).
+    if (state.stage === 'pick') { state.stage = 'plan'; state.loading = true; }
     rerenderSheet();
     try {
       // The weekly body check (if due) refreshes first, so this suggestion
@@ -1315,14 +1370,17 @@ function openMealPlanSheet(ctx, opts = {}) {
       await refreshBodyCheckIfDue(challenge).catch((err) => console.error('Body check failed:', err));
       const freshChallenge = store.state.challenges.find((c) => c.id === ctx.challengeId) || challenge;
       const freshDaysMap = store.state.days[ctx.challengeId] || {};
-      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date);
+      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date, state.pref);
       const result = await suggestMeals(freshInput, avoidDishes);
       await store.patchChallenge(ctx.challengeId, {
-        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips },
+        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips, fixes: result.fixes, pref: state.pref, have: [] },
       });
       state.meals = result.meals;
       state.why = result.why;
       state.tips = result.tips;
+      state.fixes = result.fixes;
+      state.have = [];
+      state.shareMsg = '';
       state.totals = result.totals;
       state.warning = result.warning;
       state.targets = freshInput.targets;
@@ -1409,10 +1467,81 @@ function openMealPlanSheet(ctx, opts = {}) {
     }
   }
 
+  // Persists the "have it" keys on the saved plan (merged onto the current
+  // mealPlan so meals/pref/fixes are kept).
+  async function saveHave() {
+    const current = store.state.challenges.find((c) => c.id === ctx.challengeId);
+    if (!current || !current.mealPlan) return;
+    try {
+      await store.patchChallenge(ctx.challengeId, { mealPlan: { ...current.mealPlan, have: state.have } });
+    } catch (err) {
+      console.error('Saving grocery list failed:', err);
+    }
+  }
+
+  // Plain-text list of the items still needed, grouped by category.
+  function groceryText() {
+    const have = new Set(state.have);
+    const lines = [`Grocery list for ${formatDateLong(state.forDate)}`];
+    for (const g of groceryList(state.meals)) {
+      const items = g.items.filter((i) => !have.has(groceryKey(i.name, i.unit)));
+      if (!items.length) continue;
+      lines.push('', g.label);
+      for (const i of items) lines.push(`- ${i.name} · ${i.qty} ${i.unit}`);
+    }
+    return lines.join('\n');
+  }
+
+  async function shareGrocery() {
+    const text = groceryText();
+    try {
+      if (typeof navigator !== 'undefined' && navigator.share) {
+        await navigator.share({ text });
+        return;
+      }
+      if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        state.shareMsg = 'Copied';
+        rerenderSheet();
+      }
+    } catch (err) {
+      // A dismissed share sheet rejects with AbortError — not an error.
+      if (!err || err.name !== 'AbortError') console.error('Share failed:', err);
+    }
+  }
+
   function wire(el) {
+    // Segmented/switch changes only update state — never re-render on
+    // 'input' keystrokes (it would close the phone keyboard); these aren't
+    // text inputs, so a re-render for the switch is fine.
+    el.addEventListener('change', (e) => {
+      const prefInput = e.target.closest('[data-role="meal-pref"]');
+      if (prefInput) {
+        state.pref = prefInput.value;
+        return;
+      }
+      const haveInput = e.target.closest('[data-role="grocery-have"]');
+      if (haveInput) {
+        const key = haveInput.dataset.key;
+        const set = new Set(state.have);
+        if (haveInput.checked) set.add(key); else set.delete(key);
+        state.have = [...set];
+        state.shareMsg = '';
+        saveHave();
+        rerenderSheet();
+      }
+    });
     el.addEventListener('click', (e) => {
       if (e.target.closest('[data-role="meal-plan-close"]')) {
         close();
+        return;
+      }
+      if (e.target.closest('[data-role="meal-plan-go"]')) {
+        if (!state.busy) runGenerate(opts.avoidDishes || []);
+        return;
+      }
+      if (e.target.closest('[data-role="grocery-share"]')) {
+        shareGrocery();
         return;
       }
       if (e.target.closest('[data-role="meal-plan-new"]')) {

@@ -196,7 +196,7 @@ export async function estimateCalories(blob, note) {
 
 const SUGGEST_SCHEMA = {
   type: 'OBJECT',
-  required: ['meals', 'why', 'tips'],
+  required: ['meals', 'why', 'tips', 'fixes'],
   properties: {
     meals: {
       type: 'ARRAY',
@@ -213,12 +213,35 @@ const SUGGEST_SCHEMA = {
           fat_g: { type: 'INTEGER' },
           fiber_g: { type: 'INTEGER' },
           swap_for: { type: 'STRING' },
+          ingredients: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              required: ['name', 'qty', 'unit', 'category'],
+              properties: {
+                name: { type: 'STRING' },
+                qty: { type: 'NUMBER' },
+                unit: { type: 'STRING', enum: ['g', 'ml', 'pcs', 'tbsp', 'tsp', 'cup', 'bunch'] },
+                category: { type: 'STRING', enum: ['vegetables', 'fruits', 'dairy', 'meat_fish_eggs', 'grains', 'pulses', 'spices_oils', 'other'] },
+              },
+            },
+          },
         },
       },
     },
     why: { type: 'ARRAY', items: { type: 'STRING' } },
     tips: { type: 'ARRAY', items: { type: 'STRING' } },
+    fixes: { type: 'ARRAY', items: { type: 'STRING' } },
   },
+};
+
+// The diet preference as a hard rule for the prompt (meal suggest v2 §2).
+const PREF_RULES = {
+  veg: 'Diet preference (hard rule): Veg. No meat, fish or eggs in any meal.',
+  vegan: 'Diet preference (hard rule): Vegan. No meat, fish, eggs, dairy or honey in any meal.',
+  egg: 'Diet preference (hard rule): Egg. Vegetarian food plus eggs; no meat or fish.',
+  nonveg: 'Diet preference (hard rule): Non-veg. Every meal that can include meat, fish or eggs should.',
+  mix: 'Diet preference (hard rule): Mix. At least 1 vegetarian meal and at least 1 non-veg meal (meat, fish or egg).',
 };
 
 // Builds the "suggest one dish per slot" instruction from profile.schedule
@@ -242,13 +265,17 @@ function suggestPrompt(input, avoidDishes) {
     ? `\nDo not repeat these dishes from the previous plan: ${avoidDishes.join(', ')}.`
     : '';
   return `You are a nutrition planner. Suggest a ${count}-meal plan for tomorrow for this person, one dish for each of these exact time slots: ${slotList}.
-Priority for choosing dishes, in this order:
-1. Reuse the person's own logged dishes from the last 7 days (see last7Days), adjusting portions to fit tomorrow's targets.
-2. Foods commonly available and eaten in their location.
-3. Their cuisine hint, as a tie-breaker only.
-Never include a dish or ingredient that clashes with their diet or avoid list — this is a hard rule, more important than the priorities above.${windowLine}
+Rules, in this order:
+1. Stay in the cuisine they actually eat. Work out their eating style from recentDishes and yesterday.dishes (e.g. South Indian: idli, dosa, ragi mudde, sambar, rice + curry), with profile.cuisine as a hint and profile.location for what is common and available there. Every dish must be one people in that region routinely eat at home or in local eateries. Never switch cuisine: no Italian, Mexican, continental or other out-of-pattern dishes for someone who eats South Indian food.
+2. Suggest familiar, similar dishes, not novelty: the same kinds of dishes they already eat, or close local variants of them, made healthier (e.g. more dal/eggs/chicken/paneer, less rice, more vegetables, less oil).
+3. Close yesterday's gaps (see yesterday.gaps: a "short" status means eat more of it, "over" means less) within that cuisine, e.g. "protein was 70 of 155 g: add egg bhurji with dosa, chicken sukka, extra dal".
+4. Don't copy yesterday's plate exactly: no dish from yesterday.dishes in the same slot, and at least half the dishes should differ from yesterday's.
+5. ${PREF_RULES[input.pref] || PREF_RULES[input.profile && input.profile.diet] || 'Follow their diet.'} Also follow their diet and avoid list strictly; never include a dish or ingredient that clashes with them.
+6. Fit the schedule's slots and times, and hit the calorie and macro targets.${windowLine}
 Use the exact slot name given above as "slot" in your response, one dish per slot, each with a portion size and its kcal and grams of protein/carbs/fat/fiber (integers). Set swap_for to a lighter alternative when relevant, otherwise leave it blank.
-why: 2-3 short lines tied to the last 7 days' actual eating, e.g. "Protein was short on 5 of 7 days; swapped white rice at dinner for ragi mudde."
+ingredients: for each meal, list its ingredients for 1 serving in raw/uncooked quantities, each with name, qty (number), unit (g, ml, pcs, tbsp, tsp, cup or bunch) and category (vegetables, fruits, dairy, meat_fish_eggs, grains, pulses, spices_oils or other).
+fixes: up to 3 short lines saying how this plan fixes yesterday's gaps, e.g. "Protein: 70 → 150 g with eggs, chicken, dal".
+why: 2-3 short lines tied to the last 7 days' actual eating.
 tips: up to 3 short, practical tips.${avoidLine}
 
 Person and data (JSON):
@@ -264,12 +291,22 @@ Respond only with JSON matching the schema.`;
 // from the model, and a warning is attached (not thrown) when they land
 // outside the target ±10% band — see docs §5.
 export async function suggestMeals(input, avoidDishes) {
-  const parts = [{ text: suggestPrompt(input, avoidDishes) }];
-  const parsed = await callGemini(parts, SUGGEST_SCHEMA, { offlineMessage: "You're offline. Connect to get meal suggestions." });
+  let parsed = null;
+  // Dev-only canned response (js/dev/mockSuggest.js), never on the live site.
+  let mockOn = false;
+  try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
+  if (mockOn) {
+    const { isDevHost } = await import('./dev/mock.js');
+    if (isDevHost()) parsed = await (await import('./dev/mockSuggest.js')).mockSuggest(input);
+  }
+  if (!parsed) {
+    const parts = [{ text: suggestPrompt(input, avoidDishes) }];
+    parsed = await callGemini(parts, SUGGEST_SCHEMA, { offlineMessage: "You're offline. Connect to get meal suggestions." });
+  }
   const plan = parseMealPlan(parsed);
   const totals = planTotals(plan);
   const warning = kcalWarning(totals.kcal, input.targets && input.targets.kcal);
-  return { meals: plan.meals, why: plan.why, tips: plan.tips, totals, warning };
+  return { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes, totals, warning };
 }
 
 // ---------- weekly body check (docs §3) ----------
