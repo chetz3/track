@@ -24,7 +24,7 @@ import { connect, disconnect, getAuthState, clearAuthError } from '../googleAuth
 import { getGeminiKey, setGeminiKey, clearGeminiKey } from '../gemini.js';
 import { defaultSlots, ifSlots, scheduleOf } from '../mealPlan.js';
 
-// Classic keys look like "AIza…"; newer AI Studio keys like "AQ.Ab8R…" (with a dot).
+// Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
 // Fitness weeks need 5 green days; the 3rd red day in a week resets.
 const FITNESS_WEEKLY_TARGET = 5;
 
