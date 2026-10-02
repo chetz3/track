@@ -140,6 +140,14 @@ function isValidStepMacros(m) {
   return Object.keys(m).every((k) => MACRO_KEY_VALUES.has(k) && isValidGoal(m[k]) && m[k] !== null);
 }
 
+// A step's optional `reminders` (see js/reminders.js): loosely checked —
+// null/missing, or an object whose `times` (if present) is an array of strings.
+function isValidReminders(r) {
+  if (r === null || r === undefined) return true;
+  if (!isObject(r)) return false;
+  return r.times === undefined || (Array.isArray(r.times) && r.times.every((t) => typeof t === 'string'));
+}
+
 // Matches exactly the shape migrate.js and js/ui/stepEditor.js produce (see
 // BODY_STEP/migrateStep and doSave): id/name are strings, photo/note are one
 // of a small fixed set of values (never missing — both migration paths and
@@ -158,6 +166,7 @@ function isValidStep(s) {
   if ('type' in s && !STEP_TYPE_VALUES.has(s.type)) return false;
   if ('goal' in s && !isValidGoal(s.goal)) return false;
   if ('macros' in s && !isValidStepMacros(s.macros)) return false;
+  if ('reminders' in s && !isValidReminders(s.reminders)) return false;
   return true;
 }
 

@@ -28,6 +28,65 @@ function macroTargetsToDraft(macros) {
   return draft;
 }
 
+const MAX_REMINDERS = 12;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// Draft copy of step.reminders (missing = no times; sound/vibrate default on).
+function remindersToDraft(r) {
+  return {
+    times: r && Array.isArray(r.times) ? r.times.filter((t) => TIME_RE.test(t)) : [],
+    sound: r ? r.sound !== false : true,
+    vibrate: r ? r.vibrate !== false : true,
+  };
+}
+
+// step.reminders from the draft: sorted, unique, valid HH:MM; null when no times.
+function buildRemindersFromDraft(r) {
+  const times = [...new Set(r.times.filter((t) => TIME_RE.test(t)))].sort().slice(0, MAX_REMINDERS);
+  return times.length ? { times, sound: r.sound, vibrate: r.vibrate } : null;
+}
+
+// Next full hour after the latest time, or 09:00 when there are none.
+function nextReminderTime(times) {
+  const valid = times.filter((t) => TIME_RE.test(t)).sort();
+  if (!valid.length) return '09:00';
+  const hour = Math.min(Number(valid[valid.length - 1].slice(0, 2)) + 1, 23);
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
+// Footer note under the Reminders group, from the current permission state.
+// Every Notification access is guarded — iOS Safari outside a Home Screen
+// app has no Notification global at all.
+function reminderPermissionNote() {
+  try {
+    if (typeof Notification === 'undefined') return "This browser can't show notifications here (on iPhone, open Habitly from the Home Screen).";
+    if (Notification.permission === 'denied') return 'Notifications are blocked. Allow them in your browser/phone settings.';
+  } catch (_) {
+    return "This browser can't show notifications here (on iPhone, open Habitly from the Home Screen).";
+  }
+  return '';
+}
+
+// Reminders group, shared by the full and goals-only editors.
+function remindersGroupHtml(draft) {
+  const rows = draft.reminders.times.map((t, i) => `<div class="row">
+    <span class="field-label">Reminder</span>
+    <input type="time" data-role="reminder-time" data-index="${i}" value="${esc(t)}" />
+    <button type="button" class="reminder-remove" data-role="reminder-remove" data-index="${i}" aria-label="Remove reminder">×</button>
+  </div>`).join('');
+  const addRow = draft.reminders.times.length < MAX_REMINDERS
+    ? `<div class="row"><button type="button" class="reminder-add" data-role="reminder-add">Add reminder</button></div>`
+    : '';
+  const note = reminderPermissionNote();
+  const noteHtml = note ? `<div class="section-footer error">${esc(note)}</div>` : '';
+  return `<div class="group">
+    ${rows}${addRow}
+    ${switchRow('Sound', 'reminder-sound', draft.reminders.sound)}
+    ${switchRow('Vibrate', 'reminder-vibrate', draft.reminders.vibrate)}
+  </div>
+  ${noteHtml}<div class="section-footer">Vibration works on Android. On iPhone, add Habitly to the Home Screen to get notifications.</div>`;
+}
+
 const TYPE_OPTIONS = [
   ['regular', 'Custom'], ['food', 'Food'], ['workout', 'Workout'],
   ['steps', 'Steps'], ['water', 'Water'], ['body', 'Body'], ['sleep', 'Sleep'],
@@ -60,11 +119,12 @@ function cloneStep(step) {
     target: goal ? String(goal.target) : '',
     dir: goal ? goal.dir : defaultDirFor(type),
     macroTargets: macroTargetsToDraft(type === 'food' ? step.macros : null),
+    reminders: remindersToDraft(step.reminders),
   };
 }
 
 function defaultStep() {
-  return { id: makeStepId(), name: '', mandatory: true, type: 'regular', photo: 'none', number: null, note: 'none', hasGoal: false, target: '', dir: 'atLeast', macroTargets: macroTargetsToDraft(null) };
+  return { id: makeStepId(), name: '', mandatory: true, type: 'regular', photo: 'none', number: null, note: 'none', hasGoal: false, target: '', dir: 'atLeast', macroTargets: macroTargetsToDraft(null), reminders: remindersToDraft(null) };
 }
 
 function switchRow(label, role, checked) {
@@ -169,7 +229,7 @@ function goalsOnlyBodyHtml(draft, error) {
     <div class="row"><span class="field-label">Step</span><span class="row-value">${esc(draft.name)}</span></div>
     ${rowsHtml}
   </div>
-  ${emptyHtml}${errorHtml}
+  ${emptyHtml}${remindersGroupHtml(draft)}${errorHtml}
   <div class="btn-pair">
     <button type="button" class="btn btn-secondary" data-role="cancel">Cancel</button>
     <button type="button" class="btn btn-primary" data-role="save">Save</button>
@@ -200,7 +260,8 @@ function bodyHtml(draft, error, editing) {
     ${typedRowsHtml}
     ${customRowsHtml}
   </div>
-  ${foodFooterHtml}`;
+  ${foodFooterHtml}
+  ${remindersGroupHtml(draft)}`;
 
   const errorHtml = error ? `<div class="section-footer error">${esc(error)}</div>` : '';
 
@@ -318,8 +379,13 @@ export function openStepEditor(step, onSave, onDelete, opts = {}) {
       // Only the targets change; everything else about the step is kept.
       const updated = { ...step, goal: finalStep.goal ?? null };
       if (step.type === 'food') updated.macros = finalStep.macros ?? null;
+      const reminders = buildRemindersFromDraft(draft.reminders);
+      if (reminders) updated.reminders = reminders;
+      else delete updated.reminders;
       onSave(updated);
     } else {
+      const reminders = buildRemindersFromDraft(draft.reminders);
+      if (reminders) finalStep.reminders = reminders;
       onSave(finalStep);
     }
     closeFn();
@@ -335,6 +401,8 @@ export function openStepEditor(step, onSave, onDelete, opts = {}) {
       else if (role === 'number-unit') draft.number.unit = e.target.value;
       else if (role === 'goal-target') draft.target = e.target.value;
       else if (role === 'macro-target') draft.macroTargets[e.target.dataset.macroKey] = e.target.value;
+      // Draft state only — re-rendering here would close the phone keyboard.
+      else if (role === 'reminder-time') draft.reminders.times[Number(e.target.dataset.index)] = e.target.value;
     });
 
     sheetEl.addEventListener('change', (e) => {
@@ -372,12 +440,37 @@ export function openStepEditor(step, onSave, onDelete, opts = {}) {
         rerender(sheetEl);
       } else if (role === 'goal-dir') {
         draft.dir = e.target.value;
+      } else if (role === 'reminder-sound') {
+        draft.reminders.sound = e.target.checked;
+      } else if (role === 'reminder-vibrate') {
+        draft.reminders.vibrate = e.target.checked;
       }
     });
 
     sheetEl.addEventListener('click', (e) => {
       if (e.target.closest('[data-role="cancel"]')) {
         closeFn();
+        return;
+      }
+      if (e.target.closest('[data-role="reminder-add"]')) {
+        // The permission request must come from this tap (a user gesture).
+        // Times are saved whether or not it's granted.
+        try {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+            const asked = Notification.requestPermission();
+            if (asked && typeof asked.then === 'function') asked.then(() => rerender(sheetEl)).catch(() => {});
+          }
+        } catch (_) {
+          // unsupported — the footer note explains
+        }
+        if (draft.reminders.times.length < MAX_REMINDERS) draft.reminders.times.push(nextReminderTime(draft.reminders.times));
+        rerender(sheetEl);
+        return;
+      }
+      const removeBtn = e.target.closest('[data-role="reminder-remove"]');
+      if (removeBtn) {
+        draft.reminders.times.splice(Number(removeBtn.dataset.index), 1);
+        rerender(sheetEl);
         return;
       }
       if (e.target.closest('[data-role="save"]')) {

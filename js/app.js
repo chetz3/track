@@ -16,6 +16,7 @@ import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 import { renderSummary } from './ui/summary.js';
 import { renderStats } from './ui/stats.js';
+import { startReminders } from './reminderRunner.js';
 import { consumeAuthRedirect, autoConnectIfNeeded, onAuthChange } from './googleAuth.js';
 
 const appEl = document.getElementById('app');
@@ -241,13 +242,14 @@ async function boot() {
   try {
     consumeAuthRedirect();
     const isMock = new URLSearchParams(location.search).has('mock');
-    if (!isMock && autoConnectIfNeeded()) return;
+    const isNotifyTest = new URLSearchParams(location.search).has('notify');
+    if (!isMock && !isNotifyTest && autoConnectIfNeeded()) return;
     if (isMock) {
       const mock = await import('./dev/mock.js');
       if (mock.isDevHost()) {
         await mock.seedMock(store.today());
-        localStorage.setItem('tracker:selected', 'c-mock');
-        history.replaceState(null, '', location.pathname + '#/calendar');
+        localStorage.setItem('tracker:selected', 'c-mock-fit');
+        history.replaceState(null, '', location.pathname + '#/today');
       }
     }
     await store.loadAll();
@@ -262,6 +264,13 @@ async function boot() {
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+
+    startReminders();
+
+    // Dev-only notification tester: ?notify on localhost / LAN.
+    if (isNotifyTest) {
+      import('./dev/mock.js').then((m) => { if (m.isDevHost()) m.mountNotifyTester(); }).catch(() => {});
     }
   } catch (err) {
     renderBootError(err);

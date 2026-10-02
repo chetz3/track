@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v36';
+const CACHE_NAME = 'tracker-shell-v37';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -21,6 +21,8 @@ const SHELL_FILES = [
   './js/gemini.js',
   './js/fitness.js',
   './js/mealPlan.js',
+  './js/reminders.js',
+  './js/reminderRunner.js',
   './js/ui/dom.js',
   './js/ui/fx.js',
   './js/ui/sheet.js',
@@ -109,4 +111,18 @@ self.addEventListener('fetch', (event) => {
     );
   }
   // Other cross-origin requests: let them go straight to the network.
+});
+
+// Tapping a reminder notification: focus an open Habitly window, else open it.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || './#/today';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if ('focus' in client) return client.focus();
+      }
+      return self.clients.openWindow(url);
+    }),
+  );
 });
