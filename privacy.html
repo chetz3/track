@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Habitly · Privacy Policy</title>
+  <link rel="icon" href="./icons/logo.svg" type="image/svg+xml" />
+  <style>
+    :root { color-scheme: light dark; --bg: #FFFBF5; --text: #0F172A; --text2: #475569; --link: #C2410C; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0B1020; --text: #F1F5F9; --text2: #CBD5E1; --link: #FDBA74; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 680px; margin: 0 auto; padding: 32px 16px 64px; }
+    h1 { display: flex; align-items: center; gap: 10px; font-size: 28px; margin: 0 0 4px; }
+    h1 img { width: 32px; height: 32px; border-radius: 8px; }
+    h2 { font-size: 18px; margin: 28px 0 8px; }
+    .muted { color: var(--text2); font-size: 14px; }
+    a { color: var(--link); }
+  </style>
+</head>
+<body>
+<main>
+  <h1><img src="./icons/logo.svg" alt="" />Habitly Privacy Policy</h1>
+  <p class="muted">Last updated: 2 October 2026</p>
+
+  <p>Habitly is a habit and fitness tracker that runs in your browser. It has no server of its own. This page explains what data it handles and where that data goes.</p>
+
+  <h2>Data stored on your device</h2>
+  <p>Your challenges, daily entries, notes, meal and body photos, and settings are stored only in your browser's storage on your device. We do not receive or store this data. Clearing your browser data or removing the app deletes it. You can export a backup file at any time from Challenges → Export.</p>
+
+  <h2>Google Sign-In</h2>
+  <p>If you sign in with Google, Habitly receives your email address so it can show which account is connected. It also requests access to Google Drive files that Habitly itself creates (the <code>drive.file</code> permission). Habitly cannot see any other files in your Drive. The sign-in token is kept in memory on your device only and is not sent to us.</p>
+
+  <h2>Gemini AI features</h2>
+  <p>AI features (meal calorie estimates, meal suggestions, the optional body check) use your own Google Gemini API key, which is stored only on your device. When you use these features, the meal photo or text summary you choose is sent directly from your device to Google's Gemini API under your key. Your body photo is sent only if you turn on "Use my body photo" and is sent at most once a week. Google's handling of that data is covered by <a href="https://policies.google.com/privacy">Google's Privacy Policy</a> and the Gemini API terms.</p>
+
+  <h2>What we do not do</h2>
+  <p>We do not sell data, show ads, use analytics or tracking cookies, or share your data with anyone. We have no server, so there is no copy of your data held by us.</p>
+
+  <h2>Children</h2>
+  <p>Habitly is not intended for children under 13.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the updated version will be posted on this page with a new date.</p>
+
+  <h2>Contact</h2>
+  <p>Questions: open an issue at <a href="https://github.com/chetz3/track/issues">github.com/chetz3/track/issues</a>.</p>
+
+  <p><a href="./">← Back to Habitly</a> · <a href="./terms.html">Terms of Service</a></p>
+</main>
+</body>
+</html>
