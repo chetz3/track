@@ -8,7 +8,8 @@
 import * as store from '../store.js';
 import { dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
 import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
-import { esc, formatDateLong, hydratePhotos, readFileAsPhoto } from './dom.js';
+import { esc, formatDateLong, hydratePhotos, readFileAsPhoto, icon, stepKind } from './dom.js';
+import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
@@ -153,10 +154,10 @@ export function miniRing(done, total, sizePx) {
   const pct = Number.isFinite(rawPct) ? Math.min(1, Math.max(0, rawPct)) : 0;
   const center = size / 2;
   let svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="mini-ring" role="img" aria-label="${esc(done)} of ${esc(total)}">` +
-    `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--raised)" stroke-width="${stroke}" />`;
+    `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${stroke}" />`;
   if (pct > 0) {
     const dash = c * pct;
-    svg += `<circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--accent)" stroke-width="${stroke}" stroke-linecap="round" ` +
+    svg += `<circle class="mini-ring-fg" cx="${center}" cy="${center}" r="${r}" fill="none" stroke="var(--accent)" stroke-width="${stroke}" stroke-linecap="round" ` +
       `stroke-dasharray="${dash} ${c - dash}" transform="rotate(-90 ${center} ${center})" />`;
   }
   svg += `</svg>`;
@@ -214,6 +215,17 @@ function switcherHtml(challenges, selectedId) {
   ).join('')}</div>`;
 }
 
+// Visual only: scope string for count-up keys (which challenge/day is on screen).
+function fxScope() {
+  return current ? `${current.challengeId}:${current.date}` : '';
+}
+
+// Visual only: the step-colour icon chip shown at the left of a step row.
+function stepChipHtml(step) {
+  const kind = isFoodStep(step) ? 'food' : stepKind(step);
+  return `<span class="step-chip t-${kind}" aria-hidden="true">${icon(kind)}</span>`;
+}
+
 // `target` is the day-snapshotted target for this step (see
 // fitness.targetFor), or null for a step without a goal. A goal-bearing step
 // shows "actual / target unit" (e.g. "1.5 / 2.8 L"), turning green (`.met`)
@@ -225,7 +237,7 @@ function stepSummaryHtml(step, entry, target) {
     const unit = step.number && step.number.unit ? ' ' + esc(step.number.unit) : '';
     if (isNumberValue(entry.value)) {
       const met = isStepComplete(step, entry, target);
-      parts.push(`<span class="${met ? 'met' : ''}">${esc(entry.value)} / ${esc(target)}${unit}</span>`);
+      parts.push(`<span class="${met ? 'met' : ''}"><span data-count="${esc(fxScope())}:${esc(step.id)}">${esc(entry.value)}</span> / ${esc(target)}${unit}</span>`);
     } else {
       parts.push(`<span>Target ${esc(target)}${unit}</span>`);
     }
@@ -277,7 +289,7 @@ function noteRowHtml(step, entry, fieldCtx) {
 // see foodRowsHtml).
 function mealRowHtml(step, meal, fieldCtx) {
   return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <img class="thumb" data-photo-id="${esc(meal.photoId)}" alt="" />
+    <img class="thumb thumb-meal" data-photo-id="${esc(meal.photoId)}" alt="" />
     <div class="row-label">
       <div>${esc(meal.dish || 'Meal')}</div>
       <div class="item-sub">${esc(macroDotLine(meal.macros))}</div>
@@ -374,7 +386,7 @@ function mealPlanSectionHtml(step, fieldCtx) {
   const hint = !hasDiet ? 'Set Diet in the challenge profile to get suggestions.' : !enough ? 'Log 3 meals in a day to get suggestions.' : '';
   const hintHtml = hint ? `<div class="section-footer">${esc(hint)}</div>` : '';
   return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <button type="button" class="btn btn-secondary" style="width:100%" data-role="suggest-meals" data-step-id="${esc(step.id)}"${enabled ? '' : ' disabled'}>Suggest tomorrow's meals</button>
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="suggest-meals" data-step-id="${esc(step.id)}"${enabled ? '' : ' disabled'}>${icon('sparkles')}Suggest tomorrow's meals</button>
   </div>${hintHtml}`;
 }
 
@@ -388,7 +400,7 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const analyzing = savingByKey.has(key);
   const mealsHtml = meals.map((m) => mealRowHtml(step, m, fieldCtx)).join('');
   const totalHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <span class="row-label">Total · ${esc(mealsTotal(meals))} kcal</span>
+    <span class="row-label">Total · <span data-count="${esc(fieldCtx.challengeId)}:${esc(fieldCtx.date)}:${esc(step.id)}:kcal">${esc(mealsTotal(meals))}</span> kcal</span>
   </div>`;
   const macroLinesHtml = macroTargetLinesHtml(step, meals, fieldCtx);
   // Placeholders and "Plan a meal" (docs §9) only make sense for a fitness
@@ -399,7 +411,7 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const plannedHtml = isFitness ? plannedListHtml(step, entry, fieldCtx, analyzing) : '';
   const addLabel = analyzing ? 'Analyzing…' : 'Add food';
   const addHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <label class="btn btn-primary photo-field-btn" style="width:100%">${esc(addLabel)}
+    <label class="btn btn-primary photo-field-btn${analyzing ? ' is-analyzing' : ''}" style="width:100%">${analyzing ? '' : icon('camera')}${esc(addLabel)}
       <input type="file" accept="image/*" hidden data-role="food-input" data-step-id="${esc(step.id)}"${analyzing ? ' disabled' : ''} />
     </label>
   </div>`;
@@ -417,8 +429,8 @@ function foodRowsHtml(step, entry, fieldCtx) {
 function waterRowsHtml(step, entry, fieldCtx) {
   return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <div class="btn-pair" style="width:100%">
-      <button type="button" class="btn btn-secondary" data-role="water-add" data-step-id="${esc(step.id)}" data-amount="0.25">+0.25 L</button>
-      <button type="button" class="btn btn-secondary" data-role="water-add" data-step-id="${esc(step.id)}" data-amount="0.5">+0.5 L</button>
+      <button type="button" class="btn btn-secondary water-btn" data-role="water-add" data-step-id="${esc(step.id)}" data-amount="0.25" aria-label="Add 0.25 litres">${icon('plus')}${icon('water')}0.25 L</button>
+      <button type="button" class="btn btn-secondary water-btn" data-role="water-add" data-step-id="${esc(step.id)}" data-amount="0.5" aria-label="Add 0.5 litres">${icon('plus')}${icon('water')}0.5 L</button>
     </div>
   </div>
   ${numberRowHtml(step, entry, fieldCtx)}`;
@@ -485,9 +497,10 @@ function editableStepRowHtml(step, entry, expanded, fieldCtx, target) {
   // as a read-only indicator instead of an interactive checkbox.
   const goalMet = !!step.goal && isStepComplete(step, entry, target);
   const checkHtml = step.goal
-    ? `<span class="check goal-check${goalMet ? ' done' : ''}" role="img" aria-label="${goalMet ? 'Target met' : 'Target not met yet'}"></span>`
+    ? `<span class="check goal-check${goalMet ? ' done' : ''}" role="img" aria-label="${goalMet ? 'Target met' : 'Target not met yet'}" data-fx-key="${esc(fieldCtx.challengeId)}:${esc(fieldCtx.date)}:${esc(step.id)}" data-fx-done="${goalMet ? '1' : '0'}"></span>`
     : `<input type="checkbox" class="check" data-role="check" ${entry.done ? 'checked' : ''} />`;
   let html = `<div class="row" data-role="step-row" data-step-id="${esc(step.id)}" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    ${stepChipHtml(step)}
     ${checkHtml}
     <div class="row-label">
       <div>${esc(step.name)}</div>
@@ -507,6 +520,7 @@ function readOnlyStepRowHtml(step, entry, target) {
   const check = `<span class="ro-check${complete ? ' done' : ''}">${complete ? '✓' : '–'}</span>`;
   const summary = stepSummaryHtml(step, entry, target);
   return `<div class="row">
+    ${stepChipHtml(step)}
     <div class="row-label">
       <div>${esc(step.name)}</div>
       ${requiredCaption}
@@ -1519,7 +1533,10 @@ function openWorkoutAddSheet(ctx, stepId) {
       if (role === 'workout-minutes') {
         state.minutes = e.target.value;
         recomputeKcal();
-        rerenderSheet();
+        // Update the kcal field in place — re-rendering would replace the
+        // focused minutes input and close the phone keyboard on every key.
+        const kcalInput = sheetEl.querySelector('[data-role="workout-kcal"]');
+        if (kcalInput) kcalInput.value = state.kcal;
       } else if (role === 'workout-kcal') {
         state.kcal = e.target.value;
         state.kcalTouched = true;
@@ -1935,7 +1952,7 @@ async function renderScreen(root, { date, dayRoute }) {
     : `<h1 class="large-title">${esc(challenge.name)}</h1>
        ${store.state.challenges.length >= 2 ? switcherHtml(store.state.challenges, challenge.id) : ''}`;
 
-  const heroHtml = `<div class="group">
+  const heroHtml = `<div class="group hero">
     <div class="row">
       ${miniRing(ctx.dayNumber, ctx.totalDays, 44)}
       <div class="row-label">
@@ -1993,6 +2010,8 @@ async function renderScreen(root, { date, dayRoute }) {
 
   wireDelegation(root);
   restoreFocus(root, challenge.id, date);
+  runFx(root);
+  if (pop && ctx.status === 'green') confettiOnce(root.querySelector('.hero'), `tracker:confetti:${challenge.id}:${date}`);
   await hydratePhotos(root);
 }
 
