@@ -348,3 +348,9 @@ body { padding: env(safe-area-inset-top) 0 calc(104px + env(safe-area-inset-bott
 .btn-pair > .btn + .btn, .sheet > .btn + .btn, .sheet > div[id$="-root"] > .btn + .btn { margin-top: 0; }
 
 .meal-add-preview { width: 100%; max-height: 240px; object-fit: cover; border-radius: 16px; display: block; }
+
+/* Summary viewer: big ‹ › on the picture area (left 70%, beside the panel). */
+.summary-pic-nav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 2; width: 48px; height: 48px; border-radius: 50%; border: 0; background: rgba(0,0,0,.45); color: #fff; font-size: 28px; line-height: 1; display: flex; align-items: center; justify-content: center; cursor: pointer; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.summary-pic-nav.prev { left: 12px; }
+.summary-pic-nav.next { left: calc(70% - 60px); }
+.summary-pic-nav:active { transform: translateY(-50%) scale(.94); }

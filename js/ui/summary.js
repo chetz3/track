@@ -83,9 +83,17 @@ function slideHtml(photo, index) {
   </div>`;
 }
 
-function photosHtml(photos) {
+// Big ‹ › buttons on the picture itself: step through this day's photos,
+// then on to the previous/next day that has photos (see neighbourDates).
+function pictureNavHtml(hasPrev, hasNext) {
+  return `${hasPrev ? '<button type="button" class="summary-pic-nav prev" data-role="pic-prev" aria-label="Previous picture">‹</button>' : ''}
+    ${hasNext ? '<button type="button" class="summary-pic-nav next" data-role="pic-next" aria-label="Next picture">›</button>' : ''}`;
+}
+
+function photosHtml(photos, nav = { prev: null, next: null }) {
+  const navHtml = pictureNavHtml(photos.length > 1 || !!nav.prev, photos.length > 1 || !!nav.next);
   if (!photos.length) {
-    return `<div class="summary-empty">No photos for this day</div>`;
+    return `<div class="summary-empty">No photos for this day</div>${navHtml}`;
   }
   const dotsHtml = photos.length > 1
     ? `<div class="summary-dots" data-role="dots">${photos.map((_, i) => `<span class="summary-dot${i === 0 ? ' active' : ''}"></span>`).join('')}</div>`
@@ -93,7 +101,33 @@ function photosHtml(photos) {
   return `<div class="summary-photos-wrap">
     <div class="summary-photos" data-role="photos-strip">${photos.map(slideHtml).join('')}</div>
     ${dotsHtml}
-  </div>`;
+  </div>${navHtml}`;
+}
+
+// The nearest earlier / later day (not after today) that has at least one
+// photo, so the picture's ‹ › can roll on past this day's last photo.
+function neighbourDates(challenge, date, todayStr) {
+  const daysMap = store.state.days[challenge.id] || {};
+  const withPhotos = Object.keys(daysMap)
+    .filter((d) => d <= todayStr && d !== date && buildDaySummary(challenge, daysMap[d]).photos.length > 0)
+    .sort();
+  const prev = withPhotos.filter((d) => d < date).pop() || null;
+  const next = withPhotos.find((d) => d > date) || null;
+  return { prev, next };
+}
+
+// Within the day first; past its first/last photo, jump to the adjacent day.
+function stepPicture(root, photos, dir, nav) {
+  const strip = root.querySelector('[data-role="photos-strip"]');
+  const idx = strip ? currentSlideIndex(strip, photos.length) : 0;
+  const target = idx + dir;
+  if (photos.length > 1 && target >= 0 && target < photos.length) {
+    goToSlide(root, photos, dir);
+    return;
+  }
+  const date = dir > 0 ? nav.next : nav.prev;
+  if (date) location.replace(`#/summary/${date}`);
+  else if (photos.length > 1) goToSlide(root, photos, dir); // wrap within the day
 }
 
 function itemHtml(item) {
@@ -188,7 +222,7 @@ function goToSlide(root, photos, dir) {
   strip.scrollTo({ left: next * strip.clientWidth, behavior: 'smooth' });
 }
 
-function wireControls(root, date, photos) {
+function wireControls(root, date, photos, nav = { prev: null, next: null }) {
   if (root.__summaryWired) return;
   root.__summaryWired = true;
   root.addEventListener('click', (e) => {
@@ -208,11 +242,19 @@ function wireControls(root, date, photos) {
       goToSlide(root, photos, 1);
       return;
     }
+    if (e.target.closest('[data-role="pic-prev"]')) {
+      stepPicture(root, photos, -1, nav);
+      return;
+    }
+    if (e.target.closest('[data-role="pic-next"]')) {
+      stepPicture(root, photos, 1, nav);
+      return;
+    }
     // Tapping the photo itself: left third goes back, anywhere else forward.
     const slide = e.target.closest('.summary-slide');
     if (slide) {
       const rect = slide.getBoundingClientRect();
-      goToSlide(root, photos, e.clientX < rect.left + rect.width / 3 ? -1 : 1);
+      stepPicture(root, photos, e.clientX < rect.left + rect.width / 3 ? -1 : 1, nav);
     }
   });
 }
@@ -238,15 +280,16 @@ export async function renderSummary(root, dateParam) {
   const summary = buildDaySummary(challenge, day);
   const showEdit = isEditable(date, todayStr);
 
+  const nav = neighbourDates(challenge, date, todayStr);
   root.innerHTML = `<div class="summary-viewer">
-    ${photosHtml(summary.photos)}
+    ${photosHtml(summary.photos, nav)}
     ${controlsHtml(showEdit)}
     ${panelHtml(date, status, summary.items, summary.photos)}
   </div>`;
 
   const viewer = root.querySelector('.summary-viewer');
   wireStrip(viewer, summary.photos);
-  wireControls(viewer, date, summary.photos);
+  wireControls(viewer, date, summary.photos, nav);
   attachEscHandler();
   await hydratePhotos(root);
 }
