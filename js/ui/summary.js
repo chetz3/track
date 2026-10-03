@@ -206,6 +206,13 @@ function wireControls(root, date, photos) {
     }
     if (e.target.closest('[data-role="next"]')) {
       goToSlide(root, photos, 1);
+      return;
+    }
+    // Tapping the photo itself: left third goes back, anywhere else forward.
+    const slide = e.target.closest('.summary-slide');
+    if (slide) {
+      const rect = slide.getBoundingClientRect();
+      goToSlide(root, photos, e.clientX < rect.left + rect.width / 3 ? -1 : 1);
     }
   });
 }

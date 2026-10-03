@@ -255,13 +255,34 @@ function stepSummaryHtml(step, entry, target) {
 // fieldContext) instead of a shared module variable that a later render
 // (of a different challenge/day) would have already overwritten by the
 // time an in-flight async action — e.g. the photo picker — resolves.
+// Camera + Gallery pair: Android's installed PWA offers no camera for a plain
+// accept="image/*" input, so each photo field renders two inputs with the same
+// data-role/data-* (so the delegated change handlers work for either), one
+// with capture="environment". `attrs` is the shared data-* attribute string.
+function photoPairHtml(role, attrs, primary, disabled, busyLabel, extraCls = '') {
+  const cls = primary ? 'btn-primary' : 'btn-secondary';
+  if (busyLabel) {
+    return `<label class="btn ${cls} photo-field-btn is-analyzing" style="width:100%">${esc(busyLabel)}
+      <input type="file" accept="image/*" hidden data-role="${role}" ${attrs} disabled />
+    </label>`;
+  }
+  const dis = disabled ? ' disabled' : '';
+  return `<div class="btn-pair">
+    <label class="btn ${cls} photo-field-btn">${icon('camera')}Camera
+      <input type="file" accept="image/*" capture="environment" hidden data-role="${role}" ${attrs}${dis} />
+    </label>
+    <label class="btn ${cls} photo-field-btn">${icon('image')}Gallery
+      <input type="file" accept="image/*" hidden data-role="${role}" ${attrs}${dis} />
+    </label>
+  </div>`;
+}
+
 function photoRowHtml(step, entry, fieldCtx, isSaving) {
   const disabledAttr = isSaving ? ' disabled' : '';
-  const label = isSaving ? 'Saving…' : entry.photoId ? 'Change photo' : 'Add photo';
   return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <label class="btn btn-primary photo-field-btn" style="width:100%">${esc(label)}
-      <input type="file" accept="image/*" hidden data-role="photo-input" data-step-id="${esc(step.id)}"${disabledAttr} />
-    </label>
+    ${isSaving
+      ? photoPairHtml('photo-input', `data-step-id="${esc(step.id)}"`, true, true, 'Saving…')
+      : photoPairHtml('photo-input', `data-step-id="${esc(step.id)}"`, true, false, '')}
   </div>`;
 }
 
@@ -322,11 +343,8 @@ function plannedRowHtml(step, planned, meals, fieldCtx, isSavingPhoto) {
     <button type="button" data-role="planned-delete" data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}" aria-label="Remove planned meal">×</button>
   </div>`;
   if (status === 'logged') return summaryRow;
-  const addLabel = isSavingPhoto ? 'Analyzing…' : 'Add photo';
   const photoRow = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <label class="btn btn-secondary photo-field-btn" style="width:100%">${esc(addLabel)}
-      <input type="file" accept="image/*" hidden data-role="planned-photo-input" data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}"${isSavingPhoto ? ' disabled' : ''} />
-    </label>
+    ${photoPairHtml('planned-photo-input', `data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}"`, false, false, isSavingPhoto ? 'Analyzing…' : '')}
   </div>`;
   return summaryRow + photoRow;
 }
@@ -411,11 +429,8 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const challenge = store.state.challenges.find((c) => c.id === fieldCtx.challengeId);
   const isFitness = !!challenge && challenge.category === 'fitness';
   const plannedHtml = isFitness ? plannedListHtml(step, entry, fieldCtx, analyzing) : '';
-  const addLabel = analyzing ? 'Analyzing…' : 'Add food';
   const addHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <label class="btn btn-primary photo-field-btn${analyzing ? ' is-analyzing' : ''}" style="width:100%">${analyzing ? '' : icon('camera')}${esc(addLabel)}
-      <input type="file" accept="image/*" hidden data-role="food-input" data-step-id="${esc(step.id)}"${analyzing ? ' disabled' : ''} />
-    </label>
+    ${photoPairHtml('food-input', `data-step-id="${esc(step.id)}"`, true, false, analyzing ? 'Analyzing…' : '')}
   </div>`;
   const planMealBtnHtml = isFitness ? `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-meal-open" data-step-id="${esc(step.id)}">Plan a meal</button>
@@ -761,10 +776,10 @@ function parseTotalStrict(s) {
 // `result` is null when the estimate failed (limit, offline, busy): the sheet
 // then opens in manual mode — blank dish/total, optional macro fields, and
 // `initialError` shown — so the meal can still be logged, or re-estimated.
-function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, initialError) {
+function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, initialError, initialNote = '') {
   const state = !result
-    ? { dish: '', items: [], total: '', macros: { protein: '', carbs: '', fat: '', fiber: '' }, note: '', busy: false, error: initialError || '', manual: true }
-    : { dish: result.dish || '', items: result.items, total: result.total, macros: result.macros, note: '', busy: false, error: '', manual: false };
+    ? { dish: '', items: [], total: '', macros: { protein: '', carbs: '', fat: '', fiber: '' }, note: initialNote, busy: false, error: initialError || '', manual: true }
+    : { dish: result.dish || '', items: result.items, total: result.total, macros: result.macros, note: initialNote, busy: false, error: '', manual: false };
   let saved = false;
   let sheetEl = null;
 
@@ -879,11 +894,100 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, ini
   }
 }
 
+// "Add meal" sheet shown after a same-day photo is saved: lets the user add
+// a note, then either estimate with AI or enter the meal by hand. Owns the
+// saved photo until it hands off to the confirm sheet (which then owns
+// cleanup via its own onClose); every other close path deletes it.
+function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
+  const noAiReason = !getGeminiKey()
+    ? 'No Gemini key set — enter the meal yourself. (Add a key in Challenges → Gemini AI to estimate automatically.)'
+    : !navigator.onLine ? "You're offline — enter the meal yourself." : '';
+  const state = { note: '', busy: false, error: '' };
+  const previewUrl = URL.createObjectURL(blob);
+  let handedOff = false;
+  let sheetEl = null;
+
+  const render = () => `<div id="meal-add-root">
+    <img class="meal-add-preview" src="${esc(previewUrl)}" alt="Meal photo" />
+    <label class="field-label" for="meal-add-note">Note</label>
+    <input type="text" id="meal-add-note" data-role="meal-add-note" placeholder="e.g. 2 dosa, no ghee, 1 cup rice" value="${esc(state.note)}"${state.busy ? ' disabled' : ''} />
+    ${noAiReason ? `<div class="section-footer">${esc(noAiReason)}</div>` : ''}
+    ${state.error ? `<div class="section-footer photo-error">${esc(state.error)}</div>` : ''}
+    ${noAiReason ? '' : `<button type="button" class="btn btn-primary" data-role="meal-add-estimate"${state.busy ? ' disabled' : ''}>${state.busy ? 'Estimating…' : 'Estimate with AI'}</button>`}
+    <button type="button" class="btn btn-secondary" data-role="meal-add-manual"${state.busy ? ' disabled' : ''}>Enter manually</button>
+    <button type="button" class="btn btn-secondary" data-role="meal-add-cancel">Cancel</button>
+  </div>`;
+
+  const close = openSheet({
+    title: 'Add meal',
+    bodyHtml: render(),
+    onMount: (el) => { sheetEl = el; wire(el); },
+    onClose: () => {
+      URL.revokeObjectURL(previewUrl);
+      if (!handedOff) deletePhoto(photoId).catch(() => {});
+    },
+  });
+
+  function rerenderSheet() {
+    if (!sheetEl) return;
+    const root = sheetEl.querySelector('#meal-add-root');
+    if (root) root.outerHTML = render();
+  }
+
+  // Marks the photo as owned by the confirm sheet *before* it opens: opening
+  // it supersedes this sheet, which runs onClose synchronously.
+  function handOff(result, initialError) {
+    handedOff = true;
+    openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, initialError, state.note);
+  }
+
+  function wire(el) {
+    // Only update state on typing — re-rendering here would close the keyboard.
+    el.addEventListener('input', (e) => {
+      if (e.target.dataset.role === 'meal-add-note') state.note = e.target.value;
+    });
+
+    el.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-role="meal-add-cancel"]')) {
+        close();
+        return;
+      }
+      if (state.busy) return;
+
+      if (e.target.closest('[data-role="meal-add-manual"]')) {
+        handOff(null, '');
+        return;
+      }
+
+      if (e.target.closest('[data-role="meal-add-estimate"]')) {
+        state.busy = true;
+        state.error = '';
+        rerenderSheet();
+        try {
+          const result = await estimateCalories(blob, state.note);
+          if (handedOff || !sheetEl || !sheetEl.isConnected) return; // closed meanwhile; photo already cleaned up
+          if (!result.isFood) {
+            state.busy = false;
+            state.error = 'No food found in that photo.';
+            rerenderSheet();
+            return;
+          }
+          handOff(result, '');
+        } catch (err) {
+          console.error('Food estimate failed:', err);
+          if (handedOff || !sheetEl || !sheetEl.isConnected) return;
+          handOff(null, `${(err && err.message) || "Couldn't estimate calories."} Enter it yourself or tap Re-estimate.`);
+        }
+      }
+    });
+  }
+}
+
 // The "Add food" file input (and a placeholder's own "Add photo" — docs §9,
-// via `plannedId`) funnels through here, modeled on handlePhotoFile: save
-// the photo, ask Gemini to estimate its calories, then hand off to the
-// confirm sheet. Any failure along the way deletes the photo it just wrote
-// so nothing orphaned is left in the `photos` store.
+// via `plannedId`) funnels through here, modeled on handlePhotoFile: check
+// the photo is from the right day, save it, then open the "Add meal" sheet
+// (note + estimate with AI / enter manually). Any failure along the way
+// deletes the photo it just wrote so nothing orphaned is left in the store.
 async function handleFoodFile(ctx, stepId, file, plannedId) {
   if (!file) return;
   const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
@@ -899,50 +1003,20 @@ async function handleFoodFile(ctx, stepId, file, plannedId) {
       return;
     }
     savingByKey.set(key, true);
-    rerenderIfCurrent(ctx); // show "Analyzing…" right away, before the (possibly slow) resize/upload below
+    rerenderIfCurrent(ctx); // show "Analyzing…" right away, before the resize/upload below
     photoId = await savePhoto(file);
     const blob = await getPhotoBlob(photoId);
-    // AI not available (no key, or offline): skip the call and go straight
-    // to manual entry — the photo still logs the meal.
-    const noAiReason = !getGeminiKey()
-      ? 'No Gemini key set — enter the meal yourself. (Add a key in Challenges → Gemini AI to estimate automatically.)'
-      : !navigator.onLine ? "You're offline — enter the meal yourself." : '';
-    if (noAiReason) {
-      savingByKey.delete(key);
-      rerenderIfCurrent(ctx);
-      openFoodConfirmSheet(ctx, stepId, photoId, blob, null, plannedId, noAiReason);
-      return;
-    }
-    const result = await estimateCalories(blob);
     savingByKey.delete(key);
-    if (!result.isFood) {
-      await deletePhoto(photoId).catch(() => {});
-      photoErrorByKey.set(key, 'No food found in that photo.');
-      rerenderIfCurrent(ctx);
-      return;
-    }
     rerenderIfCurrent(ctx);
-    openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId);
+    const ownedId = photoId;
+    photoId = null; // the sheet owns the photo from here on
+    openAddMealSheet(ctx, stepId, ownedId, blob, plannedId);
   } catch (err) {
-    console.error('Food estimate failed:', err);
+    console.error('Food photo failed:', err);
     savingByKey.delete(key);
-    // The photo is saved but Gemini failed (limit, offline, busy): keep it
-    // and let the user enter the meal by hand. The sheet's onClose still
-    // deletes the photo if they cancel.
-    if (photoId && !(err && err.code)) {
-      rerenderIfCurrent(ctx);
-      const blob = await getPhotoBlob(photoId).catch(() => null);
-      if (blob) {
-        openFoodConfirmSheet(ctx, stepId, photoId, blob, null, plannedId,
-          `${err.message || "Couldn't estimate calories."} Enter it yourself or tap Re-estimate.`);
-        return;
-      }
-    }
     if (photoId) await deletePhoto(photoId).catch(() => {});
-    // err.code marks a resizeImage failure (see photos.js) — everything
-    // else (no key, offline, Gemini HTTP errors) already carries a
-    // user-facing message on err.message (see js/gemini.js).
-    photoErrorByKey.set(key, err && err.code ? messageForPhotoError(err) : (err.message || "Couldn't estimate calories. Please try again."));
+    // err.code marks a resizeImage failure (see photos.js).
+    photoErrorByKey.set(key, err && err.code ? messageForPhotoError(err) : (err.message || "Couldn't save the photo. Please try again."));
     rerenderIfCurrent(ctx);
   }
 }

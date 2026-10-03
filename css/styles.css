@@ -338,3 +338,13 @@ body { padding: env(safe-area-inset-top) 0 calc(104px + env(safe-area-inset-bott
 /* Step reminders (editor) */
 .row > button.reminder-remove { min-width: 44px; min-height: 44px; border: 0; border-radius: 50%; background: var(--raised); color: var(--text2); font: 700 18px var(--font); cursor: pointer; flex: none; padding: 0; }
 .row > button.reminder-add { min-height: 44px; border: 0; background: none; color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; padding: 0; }
+
+/* Sheets whose body is wrapped in a re-renderable root (#food-confirm-root,
+   #meal-plan-root, …): give the wrapper the sheet's own column + gap, so
+   buttons, groups and footers inside it don't sit flush against each other. */
+.sheet > div[id$="-root"] { display: flex; flex-direction: column; gap: 16px; }
+/* Stacked full-width buttons anywhere else (not in a btn-pair grid). */
+.btn + .btn { margin-top: 12px; }
+.btn-pair > .btn + .btn, .sheet > .btn + .btn, .sheet > div[id$="-root"] > .btn + .btn { margin-top: 0; }
+
+.meal-add-preview { width: 100%; max-height: 240px; object-fit: cover; border-radius: 16px; display: block; }
