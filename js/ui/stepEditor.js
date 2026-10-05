@@ -59,10 +59,10 @@ function nextReminderTime(times) {
 // app has no Notification global at all.
 function reminderPermissionNote() {
   try {
-    if (typeof Notification === 'undefined') return "This browser can't show notifications here (on iPhone, open Habitly from the Home Screen).";
+    if (typeof Notification === 'undefined') return "This browser can't show notifications here (on iPhone, open FueLoop from the Home Screen).";
     if (Notification.permission === 'denied') return 'Notifications are blocked. Allow them in your browser/phone settings.';
   } catch (_) {
-    return "This browser can't show notifications here (on iPhone, open Habitly from the Home Screen).";
+    return "This browser can't show notifications here (on iPhone, open FueLoop from the Home Screen).";
   }
   return '';
 }
@@ -84,7 +84,7 @@ function remindersGroupHtml(draft) {
     ${switchRow('Sound', 'reminder-sound', draft.reminders.sound)}
     ${switchRow('Vibrate', 'reminder-vibrate', draft.reminders.vibrate)}
   </div>
-  ${noteHtml}<div class="section-footer">Vibration works on Android. On iPhone, add Habitly to the Home Screen to get notifications.</div>`;
+  ${noteHtml}<div class="section-footer">Vibration works on Android. On iPhone, add FueLoop to the Home Screen to get notifications.</div>`;
 }
 
 const TYPE_OPTIONS = [

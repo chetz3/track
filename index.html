@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Habitly</title>
-  <meta name="apple-mobile-web-app-title" content="Habitly" />
+  <title>FueLoop</title>
+  <meta name="apple-mobile-web-app-title" content="FueLoop" />
   <meta name="theme-color" content="#FFFBF5" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#0B1020" media="(prefers-color-scheme: dark)" />
   <meta name="color-scheme" content="light dark" />
@@ -36,9 +36,11 @@
     <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3z"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-infinity" viewBox="0 0 48 24"><path d="M24 12c-4-6-8-9-12.5-9a9 9 0 0 0 0 18c4.5 0 8.5-3 12.5-9s8-9 12.5-9a9 9 0 0 1 0 18c-4.5 0-8.5-3-12.5-9z" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   </svg>
-  <header class="appbar"><img src="./icons/logo.svg" alt="" width="28" height="28" /><span class="appbar-name">Habitly</span></header>
+  <header class="appbar"><img src="./icons/logo.svg" alt="" width="28" height="28" /><span class="appbar-name" aria-label="FueLoop"><span aria-hidden="true">FueL</span><svg class="wordmark-inf" aria-hidden="true" viewBox="0 0 48 24"><use href="#i-infinity"/></svg><span aria-hidden="true">p</span></span></header>
+  <div class="ai-banner" id="ai-banner" hidden><span><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg> AI is off — add your free key (2 min) for automatic calories and meal ideas.</span><button type="button" class="ai-banner-btn" data-role="ai-banner-add">Add key</button></div>
   <main id="app"></main>
   <nav class="tabbar" id="tabbar" hidden>
     <a href="#/today" data-route="today"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span>Today</span></a>

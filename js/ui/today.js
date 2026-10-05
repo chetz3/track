@@ -8,7 +8,7 @@
 import * as store from '../store.js';
 import { dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
 import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
-import { esc, formatDateLong, hydratePhotos, readFileAsPhoto, icon, stepKind } from './dom.js';
+import { esc, formatDateLong, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
 import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
@@ -262,7 +262,7 @@ function stepSummaryHtml(step, entry, target) {
 function photoPairHtml(role, attrs, primary, disabled, busyLabel, extraCls = '') {
   const cls = primary ? 'btn-primary' : 'btn-secondary';
   if (busyLabel) {
-    return `<label class="btn ${cls} photo-field-btn is-analyzing" style="width:100%">${esc(busyLabel)}
+    return `<label class="btn ${cls} photo-field-btn" style="width:100%">${loaderHtml(busyLabel)}
       <input type="file" accept="image/*" hidden data-role="${role}" ${attrs} disabled />
     </label>`;
   }
@@ -741,7 +741,7 @@ function foodConfirmBodyHtml(state) {
   </div>
   ${errorHtml}
   <div class="btn-pair">
-    ${getGeminiKey() ? `<button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? 'Re-estimating…' : 'Re-estimate'}</button>` : ''}
+    ${getGeminiKey() ? `<button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? loaderHtml('Re-estimating…') : 'Re-estimate'}</button>` : ''}
     <button type="button" class="btn btn-secondary" data-role="food-cancel">Cancel</button>
   </div>
   <button type="button" class="btn btn-primary" data-role="food-save"${disabledAttr}>Save</button>`;
@@ -913,7 +913,7 @@ function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
     <input type="text" id="meal-add-note" data-role="meal-add-note" placeholder="e.g. 2 dosa, no ghee, 1 cup rice" value="${esc(state.note)}"${state.busy ? ' disabled' : ''} />
     ${noAiReason ? `<div class="section-footer">${esc(noAiReason)}</div>` : ''}
     ${state.error ? `<div class="section-footer photo-error">${esc(state.error)}</div>` : ''}
-    ${noAiReason ? '' : `<button type="button" class="btn btn-primary" data-role="meal-add-estimate"${state.busy ? ' disabled' : ''}>${state.busy ? 'Estimating…' : 'Estimate with AI'}</button>`}
+    ${noAiReason ? '' : `<button type="button" class="btn btn-primary" data-role="meal-add-estimate"${state.busy ? ' disabled' : ''}>${state.busy ? loaderHtml('Estimating…') : 'Estimate with AI'}</button>`}
     <button type="button" class="btn btn-secondary" data-role="meal-add-manual"${state.busy ? ' disabled' : ''}>Enter manually</button>
     <button type="button" class="btn btn-secondary" data-role="meal-add-cancel">Cancel</button>
   </div>`;
@@ -1108,7 +1108,7 @@ function planMealSheetBodyHtml(state, slots, isEdit) {
   ${errorHtml}
   <div class="btn-pair">
     <button type="button" class="btn btn-secondary" data-role="plan-meal-cancel"${disabledAttr}>Cancel</button>
-    <button type="button" class="btn btn-primary" data-role="plan-meal-save"${disabledAttr}>${state.busy ? 'Saving…' : 'Save'}</button>
+    <button type="button" class="btn btn-primary" data-role="plan-meal-save"${disabledAttr}>${state.busy ? loaderHtml('Saving…') : 'Save'}</button>
   </div>`;
 }
 
@@ -1340,7 +1340,7 @@ function mealPlanBodyHtml(state) {
       <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Cancel</button>`;
   }
   if (state.loading) {
-    return `<p class="section-footer">Generating your plan…</p>`;
+    return `<div class="loader-block">${loaderHtml('Generating your plan…', 'lg')}</div>`;
   }
   if (state.error) {
     return `<div class="section-footer error">${esc(state.error)}</div>
@@ -1363,7 +1363,7 @@ function mealPlanBodyHtml(state) {
     <button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : 'Add all to tomorrow’s plan'}</button>
     ${addAllError}
     <div class="btn-pair">
-      <button type="button" class="btn btn-secondary" data-role="meal-plan-new"${state.busy ? ' disabled' : ''}>${state.busy ? 'Thinking…' : 'New ideas'}</button>
+      <button type="button" class="btn btn-secondary" data-role="meal-plan-new"${state.busy ? ' disabled' : ''}>${state.busy ? loaderHtml('Thinking…') : 'New ideas'}</button>
       <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Close</button>
     </div>
     <p class="section-footer">Not medical advice.</p>`;

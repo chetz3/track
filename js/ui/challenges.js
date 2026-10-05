@@ -15,20 +15,17 @@ import * as store from '../store.js';
 import { validateChallengeInput } from '../storeLogic.js';
 import { addDays, parseNumberInput } from '../rules.js';
 import { exportBackup, importBackup } from '../backup.js';
-import { esc, formatDateShort } from './dom.js';
+import { esc, formatDateShort, loaderHtml } from './dom.js';
 import { miniRing, refreshBodyCheckIfDue } from './today.js';
 import { openStepEditor } from './stepEditor.js';
 import { closeSheet } from './sheet.js';
 import { presetSteps, dirLabel, goalPlan, latestBodyPhotoId } from '../fitness.js';
 import { connect, disconnect, getAuthState, clearAuthError } from '../googleAuth.js';
-import { getGeminiKey, setGeminiKey, clearGeminiKey } from '../gemini.js';
+import { getGeminiKey, setGeminiKey, clearGeminiKey, GEMINI_KEY_RE } from '../gemini.js';
 import { defaultSlots, ifSlots, scheduleOf } from '../mealPlan.js';
 
-// Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
 // Fitness weeks need 5 green days; the 3rd red day in a week resets.
 const FITNESS_WEEKLY_TARGET = 5;
-
-const GEMINI_KEY_RE =/^[A-Za-z0-9._-]{20,}$/;
 
 const LAST_EXPORT_KEY = 'tracker:lastExportAt';
 
@@ -159,7 +156,7 @@ function googleSectionHtml() {
   const errorHtml = error ? `<p class="section-footer error">${esc(error)}</p>` : '';
   return `<div class="section">
     <h2 class="section-header">Google Drive</h2>
-    <button type="button" class="btn btn-primary" data-role="google-connect" ${busy ? 'disabled' : ''}>${busy ? 'Connecting…' : 'Connect Google account'}</button>
+    <button type="button" class="btn btn-primary" data-role="google-connect" ${busy ? 'disabled' : ''}>${busy ? loaderHtml('Connecting…') : 'Connect Google account'}</button>
     ${errorHtml}
     <p class="section-footer">Sign in to back up to Google Drive (coming soon).</p>
   </div>`;
@@ -171,7 +168,7 @@ function geminiSectionHtml() {
   if (key) {
     const last4 = key.slice(-4);
     return `<div class="section">
-      <h2 class="section-header">Gemini AI</h2>
+      <h2 class="section-header">Gemini AI (your key)</h2>
       <div class="group">
         <div class="row">
           <span class="row-label">Key saved · ••••${esc(last4)}</span>
@@ -182,17 +179,17 @@ function geminiSectionHtml() {
   }
 
   return `<div class="section">
-    <h2 class="section-header">Gemini AI</h2>
+    <h2 class="section-header">Gemini AI (your key)</h2>
     <div class="group">
       <div class="row">
         <input type="password" data-role="gemini-key" placeholder="Paste API key" style="text-align:left" />
       </div>
     </div>
     <button type="button" class="btn btn-primary" data-role="gemini-save">Save</button>
-    <p class="section-footer">Needed for food calorie estimates. It's free and takes a minute:</p>
+    <p class="section-footer">Optional, but FueLoop works best with it: automatic calories from photos, meal ideas and a grocery list. It's free and takes about 2 minutes:</p>
     <ol class="section-footer gemini-steps">
       <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and sign in with Google.</li>
-      <li>Tap <strong>Create API key</strong> (pick any project, or let it create one).</li>
+      <li>Tap <strong>Create API key</strong>. When asked for a project:<ul><li>Pick <strong>Default Gemini Project</strong> (Google creates it for most accounts), or any project you already have.</li><li>No project in the list? Tap <strong>Create project</strong>, name it anything (e.g. FueLoop), then create the key in it.</li></ul></li>
       <li>Copy the key (starts with <code>AIza</code> or <code>AQ.</code>), paste it above, and tap <strong>Save</strong>.</li>
     </ol>
     <p class="section-footer">Your key stays on this device only and uses your own free Gemini quota.</p>
@@ -594,7 +591,7 @@ function bodyCheckCardHtml(challenge, draft) {
   return `<div class="section">
     <h2 class="section-header">Body check</h2>
     <div class="group">${resultHtml}</div>
-    <button type="button" class="btn btn-secondary" data-role="body-check-update" ${disabled ? 'disabled' : ''}>${bodyCheckBusy ? 'Checking…' : 'Update'}</button>
+    <button type="button" class="btn btn-secondary" data-role="body-check-update" ${disabled ? 'disabled' : ''}>${bodyCheckBusy ? loaderHtml('Checking…') : 'Update'}</button>
     ${hint ? `<p class="section-footer">${esc(hint)}</p>` : ''}
     ${bodyCheckError ? `<p class="section-footer error">${esc(bodyCheckError)}</p>` : ''}
   </div>`;

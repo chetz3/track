@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v40';
+const CACHE_NAME = 'tracker-shell-v41';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -32,6 +32,7 @@ const SHELL_FILES = [
   './js/ui/summary.js',
   './js/ui/challenges.js',
   './js/ui/stepEditor.js',
+  './js/ui/aiKeySheet.js',
   './js/ui/stats.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
@@ -113,7 +114,7 @@ self.addEventListener('fetch', (event) => {
   // Other cross-origin requests: let them go straight to the network.
 });
 
-// Tapping a reminder notification: focus an open Habitly window, else open it.
+// Tapping a reminder notification: focus an open FueLoop window, else open it.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const url = (event.notification.data && event.notification.data.url) || './#/today';
