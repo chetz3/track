@@ -74,6 +74,7 @@ export async function renderCalendar(root, yyyyMm) {
   const todayStr = store.today();
   const attempt = store.displayAttempt(challenge.id);
   const lastDate = attempt ? addDays(attempt.startDate, challenge.totalDays - 1) : null;
+  const flex = store.flexDatesFor(challenge.id);
 
   const daysInMonth = new Date(year, mon, 0).getDate();
   const firstDow = new Date(year, mon - 1, 1).getDay();
@@ -83,7 +84,7 @@ export async function renderCalendar(root, yyyyMm) {
   for (let d = 1; d <= daysInMonth; d++) {
     const date = `${year}-${String(mon).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     const outside = !attempt || date < attempt.startDate || date > lastDate;
-    const status = outside ? 'outside' : dayStatus(date, store.getDay(challenge.id, date), challenge, todayStr);
+    const status = outside ? 'outside' : dayStatus(date, store.getDay(challenge.id, date), challenge, todayStr, flex);
     cellsHtml.push(calendarCellHtml(date, status, date === todayStr));
   }
 
@@ -140,6 +141,7 @@ function wireOverviewDelegation(root) {
 // app's buildFullOverview (git show main:js/app.js).
 function buildFullOverview(challenge, attempt, todayStr) {
   const frozenWeeks = attempt.greenWeeks || 0;
+  const flex = store.flexDatesFor(challenge.id);
   const lastDate = addDays(attempt.startDate, challenge.totalDays - 1);
   const weeks = [];
   let dayNumber = 1;
@@ -150,7 +152,7 @@ function buildFullOverview(challenge, attempt, todayStr) {
     for (let i = 0; i < 7 && dayNumber <= challenge.totalDays; i++, dayNumber++) {
       const date = addDays(attempt.startDate, dayNumber - 1);
       const outside = date < attempt.startDate || date > lastDate;
-      const status = outside ? 'outside' : dayStatus(date, store.getDay(challenge.id, date), challenge, todayStr);
+      const status = outside ? 'outside' : dayStatus(date, store.getDay(challenge.id, date), challenge, todayStr, flex);
       dates.push(date);
       statuses.push(status);
     }

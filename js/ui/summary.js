@@ -71,7 +71,7 @@ function computeStatus(challenge, date, day, todayStr) {
   if (!attempt) return 'outside';
   const lastDate = addDays(attempt.startDate, challenge.totalDays - 1);
   if (date < attempt.startDate || date > lastDate) return 'outside';
-  return dayStatus(date, day, challenge, todayStr);
+  return dayStatus(date, day, challenge, todayStr, store.flexDatesFor(challenge.id));
 }
 
 // ---------- markup ----------

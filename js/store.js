@@ -4,7 +4,7 @@
 // these functions and subscribe via onChange to know when to re-render.
 
 import * as db from './db.js';
-import { addDays, isEditable, evaluateAttempt, mandatorySnapshot } from './rules.js';
+import { addDays, isEditable, evaluateAttempt, mandatorySnapshot, flexDates } from './rules.js';
 import { baseTargets } from './fitness.js';
 import { dayKey } from './migrate.js';
 import { deletePhoto } from './photos.js';
@@ -74,6 +74,13 @@ export function displayAttempt(challengeId) {
   if (active) return active;
   const completed = attempts.filter((a) => a.status === 'complete');
   return completed.reduce((latest, a) => (!latest || a.startDate > latest.startDate ? a : latest), null);
+}
+
+export function flexDatesFor(challengeId) {
+  const challenge = state.challenges.find((c) => c.id === challengeId);
+  if (!challenge) return new Set();
+  const attempt = displayAttempt(challengeId);
+  return flexDates(challenge, attempt && attempt.startDate, state.days[challengeId] || {}, today());
 }
 
 export function getDay(challengeId, date) {
