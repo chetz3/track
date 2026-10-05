@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   addDays, diffDays, isEditable, isDayGreen, dayStatus, weekStatus, evaluateAttempt,
-  isNumberValue, parseNumberInput, requiredFieldsFilled, isStepComplete, mandatorySnapshot,
+  isNumberValue, parseNumberInput, requiredFieldsFilled, isStepComplete, mandatorySnapshot, flexDates,
 } from '../js/rules.js';
 
 const TODAY = '2026-09-25';
@@ -273,5 +273,82 @@ test('evaluateAttempt: a later, non-frozen week is still scored against the curr
   const result = evaluateAttempt(cfg, attempt, days, TODAY);
   assert.equal(result.weeks[0].status, 'green'); // still frozen
   assert.equal(result.weeks[1].status, 'red');
+  assert.equal(result.outcome, 'reset');
+});
+
+// ---------- food flex days ----------
+
+const foodStep = { id: 'food', name: 'Food', type: 'food', mandatory: true, photo: 'none', number: { unit: 'kcal', required: false }, note: 'none', goal: { target: 2000, dir: 'atMost' } };
+function foodChallenge(overrides = {}) {
+  return { id: 'f1', name: 'Fit', category: 'fitness', totalDays: 100, weeklyTarget: 5, steps: [foodStep], ...overrides };
+}
+function foodDay(date, value) {
+  return { key: `f1|${date}`, challengeId: 'f1', date, mandatoryStepIds: ['food'], steps: { food: { value } } };
+}
+
+test('isStepComplete: food over target by 150 passes only with flex; by 250 never', () => {
+  assert.equal(isStepComplete(foodStep, { value: 2150 }, 2000), false);
+  assert.equal(isStepComplete(foodStep, { value: 2150 }, 2000, { flex: true }), true);
+  assert.equal(isStepComplete(foodStep, { value: 2250 }, 2000), false);
+  assert.equal(isStepComplete(foodStep, { value: 2250 }, 2000, { flex: true }), false);
+});
+
+test('flexDates: only the first 2 of 3 over-by-100 days in a week are included', () => {
+  const start = addDays(TODAY, -20);
+  const days = {};
+  for (let i = 0; i < 3; i++) days[addDays(start, i)] = foodDay(addDays(start, i), 2100);
+  const set = flexDates(foodChallenge(), start, days, TODAY);
+  assert.deepEqual([...set], [addDays(start, 0), addDays(start, 1)]);
+});
+
+test('flexDates: green days and days over by 300 are not counted', () => {
+  const start = addDays(TODAY, -20);
+  const days = {
+    [start]: foodDay(start, 2000),
+    [addDays(start, 1)]: foodDay(addDays(start, 1), 2300),
+    [addDays(start, 2)]: foodDay(addDays(start, 2), 2100),
+  };
+  const set = flexDates(foodChallenge(), start, days, TODAY);
+  assert.deepEqual([...set], [addDays(start, 2)]);
+});
+
+test('flexDates: a new challenge week resets the count', () => {
+  const start = addDays(TODAY, -20);
+  const days = {};
+  for (const i of [0, 1, 2, 7, 8, 9]) days[addDays(start, i)] = foodDay(addDays(start, i), 2100);
+  const set = flexDates(foodChallenge(), start, days, TODAY);
+  assert.deepEqual([...set], [0, 1, 7, 8].map((i) => addDays(start, i)));
+});
+
+test('flexDates: empty without a startDate or a non-gain food goal', () => {
+  assert.equal(flexDates(foodChallenge(), null, {}, TODAY).size, 0);
+  const gain = foodChallenge({ steps: [{ ...foodStep, goal: { target: 2000, dir: 'atLeast' } }] });
+  assert.equal(flexDates(gain, addDays(TODAY, -5), { [addDays(TODAY, -5)]: foodDay(addDays(TODAY, -5), 2100) }, TODAY).size, 0);
+});
+
+test('dayStatus: flex set turns an over-target day green', () => {
+  const d = addDays(TODAY, -5);
+  const day = foodDay(d, 2100);
+  assert.equal(dayStatus(d, day, foodChallenge(), TODAY), 'red');
+  assert.equal(dayStatus(d, day, foodChallenge(), TODAY, new Set([d])), 'green');
+});
+
+test('evaluateAttempt fitness: 2 flex + 2 red + 3 green does not reset', () => {
+  const start = addDays(TODAY, -9);
+  const vals = [2000, 2100, 2100, 2000, 2000, 0, 0];
+  const days = {};
+  vals.forEach((v, i) => { days[addDays(start, i)] = foodDay(addDays(start, i), v); });
+  const result = evaluateAttempt(foodChallenge(), { id: 'a', startDate: start, status: 'active' }, days, TODAY);
+  assert.notEqual(result.outcome, 'reset');
+  assert.equal(result.weeks[0].status, 'green');
+});
+
+test('evaluateAttempt fitness: a 3rd over-by-100 day counts as red', () => {
+  const start = addDays(TODAY, -9);
+  const vals = [2000, 2000, 2100, 2100, 2100, 0, 0];
+  const days = {};
+  vals.forEach((v, i) => { days[addDays(start, i)] = foodDay(addDays(start, i), v); });
+  const result = evaluateAttempt(foodChallenge(), { id: 'a', startDate: start, status: 'active' }, days, TODAY);
+  assert.equal(result.weeks[0].dayStatuses[4], 'red');
   assert.equal(result.outcome, 'reset');
 });

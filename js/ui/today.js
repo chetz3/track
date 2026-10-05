@@ -6,7 +6,7 @@
 // hydratePhotos only on that attached container.
 
 import * as store from '../store.js';
-import { dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
+import { FLEX_KCAL, FLEX_PER_WEEK, dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
 import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
 import { esc, formatDateLong, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
 import { runFx, confettiOnce } from './fx.js';
@@ -179,13 +179,14 @@ function computeDayContext(challenge, attempt, date, day, todayStr) {
   const weekNum = weekIndex + 1;
   const weekStart = addDays(attempt.startDate, weekIndex * 7);
   const weekLen = Math.min(7, totalDays - weekIndex * 7);
+  const flex = store.flexDatesFor(challenge.id);
   let green = 0;
   for (let i = 0; i < weekLen; i++) {
     const d = addDays(weekStart, i);
-    if (dayStatus(d, store.getDay(challenge.id, d), challenge, todayStr) === 'green') green++;
+    if (dayStatus(d, store.getDay(challenge.id, d), challenge, todayStr, flex) === 'green') green++;
   }
   const weekTarget = Math.min(challenge.weeklyTarget, weekLen);
-  const status = outside ? 'outside' : dayStatus(date, day, challenge, todayStr);
+  const status = outside ? 'outside' : dayStatus(date, day, challenge, todayStr, flex);
   return { dayNumber, totalDays, weekNum, green, weekTarget, status, outside };
 }
 
@@ -230,14 +231,23 @@ function stepChipHtml(step) {
 // fitness.targetFor), or null for a step without a goal. A goal-bearing step
 // shows "actual / target unit" (e.g. "1.5 / 2.8 L"), turning green (`.met`)
 // once meetsGoal is satisfied — see the Phase A spec's Today section.
-function stepSummaryHtml(step, entry, target) {
+function isFlexFood(step) {
+  return !!step.goal && step.type === 'food' && step.goal.dir !== 'atLeast';
+}
+
+function flexBadgeHtml(step, entry, target, flexOn) {
+  if (!flexOn || !isFlexFood(step) || !isNumberValue(entry.value) || target == null || !(entry.value > target)) return '';
+  return `<span class="flex-badge">Flex +${esc(Math.round((entry.value - target) * 100) / 100)}</span>`;
+}
+
+function stepSummaryHtml(step, entry, target, flexOn = false) {
   const parts = [];
   if (entry.photoId) parts.push(`<img class="thumb" data-photo-id="${esc(entry.photoId)}" alt="" />`);
   if (step.goal && target != null) {
     const unit = step.number && step.number.unit ? ' ' + esc(step.number.unit) : '';
     if (isNumberValue(entry.value)) {
-      const met = isStepComplete(step, entry, target);
-      parts.push(`<span class="${met ? 'met' : ''}"><span data-count="${esc(fxScope())}:${esc(step.id)}">${esc(entry.value)}</span> / ${esc(target)}${unit}</span>`);
+      const met = isStepComplete(step, entry, target, { flex: flexOn });
+      parts.push(`<span class="${met ? 'met' : ''}"><span data-count="${esc(fxScope())}:${esc(step.id)}">${esc(entry.value)}</span> / ${esc(target)}${unit}</span>${flexBadgeHtml(step, entry, target, flexOn)}`);
     } else {
       parts.push(`<span>Target ${esc(target)}${unit}</span>`);
     }
@@ -414,6 +424,22 @@ function mealPlanSectionHtml(step, fieldCtx) {
 // per logged meal, a running total, and the "Add food" picker that drives
 // handleFoodFile below. Errors go through the same photoErrorByKey slot the
 // photo/number/note flow uses.
+// "Flex days this week: N of 2 used" — fitness challenges with a non-gain
+// food goal only. Counts the derived flex dates inside this challenge week.
+function flexFooterHtml(step, fieldCtx) {
+  const challenge = store.state.challenges.find((c) => c.id === fieldCtx.challengeId);
+  if (!challenge || challenge.category !== 'fitness' || !isFlexFood(step)) return '';
+  const attempt = store.displayAttempt(challenge.id);
+  if (!attempt) return '';
+  const dayNo = diffDays(attempt.startDate, fieldCtx.date);
+  if (dayNo < 0) return '';
+  const weekStart = addDays(attempt.startDate, Math.floor(dayNo / 7) * 7);
+  const weekEnd = addDays(weekStart, 6);
+  let used = 0;
+  for (const d of store.flexDatesFor(challenge.id)) if (d >= weekStart && d <= weekEnd) used++;
+  return `<p class="section-footer">Flex days this week: ${used} of ${FLEX_PER_WEEK} used (up to +${FLEX_KCAL} kcal over target)</p>`;
+}
+
 function foodRowsHtml(step, entry, fieldCtx) {
   const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
   const meals = Array.isArray(entry.meals) ? entry.meals : [];
@@ -422,7 +448,7 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const totalHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <span class="row-label">Total · <span data-count="${esc(fieldCtx.challengeId)}:${esc(fieldCtx.date)}:${esc(step.id)}:kcal">${esc(mealsTotal(meals))}</span> kcal</span>
   </div>`;
-  const macroLinesHtml = macroTargetLinesHtml(step, meals, fieldCtx);
+  const macroLinesHtml = macroTargetLinesHtml(step, meals, fieldCtx) + flexFooterHtml(step, fieldCtx);
   // Placeholders and "Plan a meal" (docs §9) only make sense for a fitness
   // challenge's food step — the same gate mealPlanSectionHtml below uses,
   // since both need a profile.schedule to plan slots around.
@@ -501,7 +527,7 @@ function expandedRowsHtml(step, entry, fieldCtx) {
   return html;
 }
 
-function editableStepRowHtml(step, entry, expanded, fieldCtx, target) {
+function editableStepRowHtml(step, entry, expanded, fieldCtx, target, flexOn = false) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
   // A save error on this step shows expanded (as the shared footer in
   // expandedRowsHtml, right under its fields) or, collapsed, as this short
@@ -512,7 +538,7 @@ function editableStepRowHtml(step, entry, expanded, fieldCtx, target) {
   // A goal-bearing step's completion is decided entirely by meetsGoal (see
   // isStepComplete) — the done checkbox has no effect on it, so it's shown
   // as a read-only indicator instead of an interactive checkbox.
-  const goalMet = !!step.goal && isStepComplete(step, entry, target);
+  const goalMet = !!step.goal && isStepComplete(step, entry, target, { flex: flexOn });
   const checkHtml = step.goal
     ? `<span class="check goal-check${goalMet ? ' done' : ''}" role="img" aria-label="${goalMet ? 'Target met' : 'Target not met yet'}" data-fx-key="${esc(fieldCtx.challengeId)}:${esc(fieldCtx.date)}:${esc(step.id)}" data-fx-done="${goalMet ? '1' : '0'}"></span>`
     : `<input type="checkbox" class="check" data-role="check" ${entry.done ? 'checked' : ''} />`;
@@ -524,18 +550,18 @@ function editableStepRowHtml(step, entry, expanded, fieldCtx, target) {
       ${requiredCaption}
       ${collapsedErrorHtml}
     </div>
-    <div class="step-summary">${stepSummaryHtml(step, entry, target)}</div>
+    <div class="step-summary">${stepSummaryHtml(step, entry, target, flexOn)}</div>
   </div>`;
   if (expanded) html += expandedRowsHtml(step, entry, fieldCtx);
   return html;
 }
 
-function readOnlyStepRowHtml(step, entry, target) {
+function readOnlyStepRowHtml(step, entry, target, flexOn = false) {
   const requiredCaption = step.mandatory ? '<div class="step-required">Required</div>' : '';
   const noteHtml = entry.note ? `<div class="step-note">${esc(entry.note)}</div>` : '';
-  const complete = isStepComplete(step, entry, target);
+  const complete = isStepComplete(step, entry, target, { flex: flexOn });
   const check = `<span class="ro-check${complete ? ' done' : ''}">${complete ? '✓' : '–'}</span>`;
-  const summary = stepSummaryHtml(step, entry, target);
+  const summary = stepSummaryHtml(step, entry, target, flexOn);
   return `<div class="row">
     ${stepChipHtml(step)}
     <div class="row-label">
@@ -2168,11 +2194,12 @@ async function renderScreen(root, { date, dayRoute }) {
 
   const eatingWindowHtml = eatingWindowLineHtml(challenge, date, todayStr);
 
+  const flexOn = store.flexDatesFor(challenge.id).has(date);
   const stepsHtml = challenge.steps.map((step) => {
     const entry = (day.steps && day.steps[step.id]) || {};
     const target = targetFor(day, step);
-    if (!editable) return readOnlyStepRowHtml(step, entry, target);
-    return editableStepRowHtml(step, entry, expandedStepId === step.id, fieldCtx, target);
+    if (!editable) return readOnlyStepRowHtml(step, entry, target, flexOn);
+    return editableStepRowHtml(step, entry, expandedStepId === step.id, fieldCtx, target, flexOn);
   }).join('');
 
   const sectionTitle = dayRoute && date !== todayStr ? 'Steps' : "Today's steps";

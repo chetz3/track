@@ -72,14 +72,17 @@ export function requiredFieldsFilled(stepDef, entry) {
 // stepDef.goal exists, completion is decided purely by meetsGoal(value,
 // target ?? stepDef.goal.target, dir) — the done checkbox is ignored, since
 // there's nothing for the user to "tick" beyond hitting the number.
-export function isStepComplete(stepDef, entry, target) {
+export const FLEX_KCAL = 200;
+export const FLEX_PER_WEEK = 2;
+
+export function isStepComplete(stepDef, entry, target, opts = {}) {
   if (stepDef && stepDef.goal) {
     const t = target ?? stepDef.goal.target;
     const value = entry && entry.value;
     // Food (unless the aim is to gain) is green from half the target up to
     // the target — a snack isn't a day, and going over isn't a pass.
     if (stepDef.type === 'food' && stepDef.goal.dir !== 'atLeast') {
-      return Number.isFinite(value) && Number.isFinite(t) && value >= 0.5 * t && value <= t;
+      return Number.isFinite(value) && Number.isFinite(t) && value >= 0.5 * t && value <= t + (opts.flex ? FLEX_KCAL : 0);
     }
     return meetsGoal(value, t, stepDef.goal.dir);
   }
@@ -96,16 +99,56 @@ export function mandatorySnapshot(challenge) {
 
 // A day is green when every mandatory step recorded in its snapshot
 // (day.mandatoryStepIds) is complete. Optional steps never affect colour.
-export function isDayGreen(day, challenge) {
+export function isDayGreen(day, challenge, opts = {}) {
   if (!day || !Array.isArray(day.mandatoryStepIds)) return false;
   const steps = day.steps || {};
   return day.mandatoryStepIds.every((id) =>
-    isStepComplete(challenge.steps.find((s) => s.id === id), steps[id], day.targets && day.targets[id]));
+    isStepComplete(challenge.steps.find((s) => s.id === id), steps[id], day.targets && day.targets[id], opts));
 }
 
-export function dayStatus(date, day, challenge, today) {
+// Flex days: up to FLEX_PER_WEEK days per challenge week where a food step
+// may run up to FLEX_KCAL over target. Derived, never stored. Only days that
+// would be non-green but become green with flex use one, in date order.
+function foodNeedsFlex(day, challenge) {
+  if (!day || !day.steps) return false;
+  return (challenge.steps || []).some((s) => {
+    if (s.type !== 'food' || !s.goal || s.goal.dir === 'atLeast') return false;
+    const entry = day.steps[s.id];
+    const target = day.targets && day.targets[s.id];
+    return !isStepComplete(s, entry, target) && isStepComplete(s, entry, target, { flex: true });
+  });
+}
+
+export function flexDates(challenge, startDate, daysMap, today) {
+  const out = new Set();
+  const hasFood = (challenge.steps || []).some((s) => s.type === 'food' && s.goal && s.goal.dir !== 'atLeast');
+  if (!startDate || !hasFood) return out;
+  for (let weekStart = 1; weekStart <= challenge.totalDays; weekStart += 7) {
+    let used = 0;
+    for (let n = weekStart; n < weekStart + 7 && n <= challenge.totalDays; n++) {
+      const date = addDays(startDate, n - 1);
+      if (date > today) return out;
+      if (used >= FLEX_PER_WEEK) break;
+      const day = daysMap && daysMap[date];
+      // A still-editable day (today/yesterday) reserves flex as soon as its
+      // food alone needs it, so the food step shows green before the other
+      // steps are done. Locked days only use it when it turns the day green.
+      const needs = isEditable(date, today)
+        ? foodNeedsFlex(day, challenge)
+        : !isDayGreen(day, challenge) && isDayGreen(day, challenge, { flex: true });
+      if (needs) {
+        out.add(date);
+        used++;
+      }
+    }
+  }
+  return out;
+}
+
+export function dayStatus(date, day, challenge, today, flex = null) {
   if (date > today) return 'future';
   if (isDayGreen(day, challenge)) return 'green';
+  if (flex && flex.has(date) && isDayGreen(day, challenge, { flex: true })) return 'green';
   if (isEditable(date, today)) return 'pending';
   return 'red';
 }
@@ -145,6 +188,7 @@ export function evaluateAttempt(challenge, attempt, daysMap, today) {
   const { totalDays, weeklyTarget } = challenge;
   const isFitness = challenge.category === 'fitness';
   const startDate = attempt.startDate;
+  const flex = flexDates(challenge, startDate, daysMap, today);
   const frozenWeeks = attempt.greenWeeks || 0;
   const weeks = [];
   let dayNumber = 1;
@@ -166,7 +210,7 @@ export function evaluateAttempt(challenge, attempt, daysMap, today) {
     for (let i = 0; i < 7 && dayNumber <= totalDays; i++, dayNumber++) {
       const date = addDays(startDate, dayNumber - 1);
       const day = daysMap[date];
-      const ds = dayStatus(date, day, challenge, today);
+      const ds = dayStatus(date, day, challenge, today, flex);
       weekDayStatuses.push(ds);
       weekEndDate = date;
       if (ds === 'red') redCount++;
