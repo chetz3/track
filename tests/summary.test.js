@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDaySummary, buildPhotoProgress } from '../js/summaryModel.js';
+import { buildDaySummary, buildDayDetails, buildPhotoProgress } from '../js/summaryModel.js';
 
 const ch = { steps: [
   { id: 'body', name: 'Body', mandatory: true, photo: 'required', number: { label: 'Weight', unit: 'kg', required: true }, note: 'none' },
@@ -72,4 +72,53 @@ test('buildPhotoProgress with no matching photos returns an empty grid', () => {
   const { tiles, change } = buildPhotoProgress(ch, {}, attempt, 'body', 'body');
   assert.deepEqual(tiles, []);
   assert.equal(change, null);
+});
+
+const fch = { steps: [
+  { id: 'food', name: 'Food', type: 'food', mandatory: true, photo: 'none', number: { label: 'Calories', unit: 'kcal' }, goal: { target: 2000, dir: 'atMost' } },
+  { id: 'workout', name: 'Workout', type: 'workout', mandatory: true, photo: 'none', number: { label: 'Workout', unit: 'min' }, goal: { target: 30, dir: 'atLeast' } },
+  { id: 'read', name: 'Read', mandatory: false, photo: 'none', number: null },
+] };
+const fday = { date: '2026-09-25', steps: {
+  food: { done: true, value: 1500, note: 'ok', meals: [
+    { id: 'm1', photoId: 'mp1', dish: 'Eggs', calories: 600, macros: { protein: 30, carbs: 5, fat: 40, fiber: 0 } },
+    { id: 'm2', dish: '', calories: 900, macros: { protein: 40, carbs: 100, fat: 20, fiber: 8 } },
+    { id: 'm3', photoId: 'mp3', dish: 'Soup', calories: 0, macros: null },
+  ] },
+  workout: { done: true, value: 45, sessions: [{ type: 'Run', minutes: 45, intensity: 'hard', kcal: 400 }] },
+} };
+
+test('buildDaySummary appends meal photos with captions', () => {
+  const s = buildDaySummary(fch, fday);
+  assert.deepEqual(s.photos, [
+    { stepId: 'food', stepName: 'Food', photoId: 'mp1', caption: 'Eggs · 600 kcal' },
+    { stepId: 'food', stepName: 'Food', photoId: 'mp3', caption: 'Soup · 0 kcal' },
+  ]);
+});
+
+test('buildDayDetails food lists every meal plus the total', () => {
+  const d = buildDayDetails(fch, fday);
+  const food = d[0];
+  assert.equal(food.headline, '1500 / 2000 kcal');
+  assert.equal(food.complete, true);
+  assert.equal(food.note, 'ok');
+  assert.deepEqual(food.rows.map((r) => r.title), ['Eggs', 'Meal', 'Soup', 'Total']);
+  assert.equal(food.rows[0].photoId, 'mp1');
+  assert.equal(food.rows[1].photoId, undefined);
+  assert.match(food.rows[0].sub, /^600 kcal · /);
+  assert.match(food.rows[3].sub, /^1500 kcal · /);
+});
+
+test('buildDayDetails workout sessions', () => {
+  const w = buildDayDetails(fch, fday)[1];
+  assert.deepEqual(w.rows, [{ title: 'Run', sub: '45 min · hard · 400 kcal' }]);
+  assert.equal(w.headline, '45 / 30 min');
+});
+
+test('buildDayDetails headline with a target and no value; step with no entry', () => {
+  const d = buildDayDetails(fch, { date: 'x', steps: {}, targets: { workout: 40 } });
+  assert.equal(d[1].headline, 'Target 40 min');
+  assert.equal(d[1].complete, false);
+  assert.deepEqual(d[2], { stepId: 'read', name: 'Read', mandatory: false, complete: false, headline: '—', rows: [] });
+  assert.equal(buildDayDetails(fch, undefined).length, 3);
 });
