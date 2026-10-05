@@ -6,7 +6,6 @@
     </linearGradient>
   </defs>
   <rect width="64" height="64" rx="16" fill="url(#g)"/>
-  <!-- Habit loop: an almost-closed ring (the streak), with a check inside. -->
-  <path d="M44.7 19.3A18 18 0 1 0 50 32" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
-  <path d="M24 32.5l6 6 11-12" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- FueLoop mark: a white infinity loop (lemniscate) -->
+  <path d="M54.00 32.00 L53.75 33.90 L53.03 35.65 L51.92 37.15 L50.51 38.33 L48.92 39.15 L47.24 39.62 L45.56 39.78 L43.93 39.67 L42.37 39.33 L40.91 38.83 L39.55 38.19 L38.29 37.44 L37.10 36.63 L36.00 35.75 L34.95 34.85 L33.94 33.91 L32.96 32.96 L32.00 32.00 L31.04 31.04 L30.06 30.09 L29.05 29.15 L28.00 28.25 L26.90 27.37 L25.71 26.56 L24.45 25.81 L23.09 25.17 L21.63 24.67 L20.07 24.33 L18.44 24.22 L16.76 24.38 L15.08 24.85 L13.49 25.67 L12.08 26.85 L10.97 28.35 L10.25 30.10 L10.00 32.00 L10.25 33.90 L10.97 35.65 L12.08 37.15 L13.49 38.33 L15.08 39.15 L16.76 39.62 L18.44 39.78 L20.07 39.67 L21.63 39.33 L23.09 38.83 L24.45 38.19 L25.71 37.44 L26.90 36.63 L28.00 35.75 L29.05 34.85 L30.06 33.91 L31.04 32.96 L32.00 32.00 L32.96 31.04 L33.94 30.09 L34.95 29.15 L36.00 28.25 L37.10 27.37 L38.29 26.56 L39.55 25.81 L40.91 25.17 L42.37 24.67 L43.93 24.33 L45.56 24.22 L47.24 24.38 L48.92 24.85 L50.51 25.67 L51.92 26.85 L53.03 28.35 L53.75 30.10Z" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

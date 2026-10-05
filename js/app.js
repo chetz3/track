@@ -16,6 +16,8 @@ import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 import { renderSummary } from './ui/summary.js';
 import { renderStats } from './ui/stats.js';
+import { getGeminiKey } from './gemini.js';
+import { openAiKeySheet } from './ui/aiKeySheet.js';
 import { startReminders } from './reminderRunner.js';
 import { consumeAuthRedirect, autoConnectIfNeeded, onAuthChange } from './googleAuth.js';
 
@@ -214,7 +216,21 @@ async function render() {
     window.scrollTo(0, 0);
   }
   pendingScrollY = null;
+  updateAiBanner();
 }
+
+// Top banner: visible whenever there's no Gemini key (dismissed prompt or not),
+// except on the full-screen summary route.
+function updateAiBanner() {
+  const banner = document.getElementById('ai-banner');
+  if (!banner) return;
+  banner.hidden = !!getGeminiKey() || matchRoute().top === 'summary';
+}
+
+window.addEventListener('fueloop:aikey', () => { updateAiBanner(); scheduleRender(); });
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-role="ai-banner-add"]')) openAiKeySheet();
+});
 
 window.addEventListener('hashchange', () => scheduleRender());
 store.onChange(() => scheduleRender());
@@ -262,6 +278,12 @@ async function boot() {
     // No explicit `#/today` write here: matchRoute() already treats a blank
     // hash as `today`, and writing it would fire a redundant hashchange.
     await render();
+
+    let promptDismissed = false;
+    try { promptDismissed = localStorage.getItem('tracker:aiPromptDismissed') === '1'; } catch (_) { /* storage blocked */ }
+    if (!getGeminiKey() && !promptDismissed && !isNotifyTest && matchRoute().top !== 'summary') {
+      openAiKeySheet({ welcome: true });
+    }
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});

@@ -8,6 +8,9 @@
 import { parseCalorieResult } from './foodLogic.js';
 import { parseMealPlan, planTotals, kcalWarning, eatingWindow } from './mealPlan.js';
 
+// Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
+export const GEMINI_KEY_RE = /^[A-Za-z0-9._-]{20,}$/;
+
 export const KEY_STORAGE = 'tracker:geminiKey';
 
 export function getGeminiKey() {
@@ -18,12 +21,17 @@ export function getGeminiKey() {
   }
 }
 
+function notifyKeyChange() {
+  try { window.dispatchEvent(new Event('fueloop:aikey')); } catch (_) { /* no window */ }
+}
+
 export function setGeminiKey(key) {
   try {
     localStorage.setItem(KEY_STORAGE, key);
   } catch (_) {
     // ignore (private mode, quota, etc.)
   }
+  notifyKeyChange();
 }
 
 export function clearGeminiKey() {
@@ -32,6 +40,7 @@ export function clearGeminiKey() {
   } catch (_) {
     // ignore (private mode, quota, etc.)
   }
+  notifyKeyChange();
 }
 
 // Aliases track the current free-tier models. The lite model is the fallback

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generates the Habitly PNG app icons (192 and 512) using only the
+"""Generates the FueLoop PNG app icons (192, 512) and logo-120.png using only the
 standard library (zlib + struct) — no Pillow/npm dependency needed.
 
 Same mark as icons/logo.svg: a coral→amber diagonal gradient with a white
-habit loop (an almost-closed ring) and a check inside. The square is
+infinity loop (lemniscate). The square is
 full-bleed (no rounded corners) because the OS applies its own icon mask;
 the mark sits well inside the maskable safe zone. Edges are anti-aliased by
 3×3 supersampling.
@@ -17,11 +17,19 @@ C1 = (0xFF, 0x6B, 0x4A)  # coral  (#FF6B4A)
 C2 = (0xF5, 0x9E, 0x0B)  # amber  (#F59E0B)
 WHITE = (255, 255, 255)
 
-# Geometry in the 64-unit space of logo.svg.
-CX, CY, R, STROKE = 32.0, 32.0, 18.0, 5.0
-GAP_FROM, GAP_TO = -45.0, 0.0  # ring is open between these angles (degrees, y down)
-ARC_ENDS = [(44.7279, 19.2721), (50.0, 32.0)]
-CHECK = [(24.0, 32.5), (30.0, 38.5), (41.0, 26.5)]
+# Geometry in the 64-unit space of logo.svg: a lemniscate (infinity loop)
+# x = a*cos t/(1+sin^2 t), y = a*sin t*cos t/(1+sin^2 t), centred at 32,32.
+CX, CY, A, STROKE = 32.0, 32.0, 22.0, 5.0
+N_POINTS = 240
+CURVE = []
+for _i in range(N_POINTS):
+    _t = 2 * math.pi * _i / N_POINTS
+    _d = 1 + math.sin(_t) ** 2
+    CURVE.append((CX + A * math.cos(_t) / _d, CY + A * math.sin(_t) * math.cos(_t) / _d))
+SEGMENTS = list(zip(CURVE, CURVE[1:] + CURVE[:1]))
+# Bounding box of the curve (inflated by half the stroke) to skip far pixels fast.
+BX0, BX1 = CX - A - STROKE, CX + A + STROKE
+BY0, BY1 = CY - A * 0.36 - STROKE, CY + A * 0.36 + STROKE
 
 
 def dist_to_segment(px, py, x1, y1, x2, y2):
@@ -31,18 +39,10 @@ def dist_to_segment(px, py, x1, y1, x2, y2):
 
 
 def is_mark(u, v):
+    if not (BX0 <= u <= BX1 and BY0 <= v <= BY1):
+        return False
     half = STROKE / 2
-    # ring, minus the gap, plus round caps at both ends
-    d = math.hypot(u - CX, v - CY)
-    if abs(d - R) <= half:
-        ang = math.degrees(math.atan2(v - CY, u - CX))
-        if not (GAP_FROM < ang < GAP_TO):
-            return True
-    for ex, ey in ARC_ENDS:
-        if math.hypot(u - ex, v - ey) <= half:
-            return True
-    # check mark (round joins/caps come free from distance-to-segment)
-    for (x1, y1), (x2, y2) in zip(CHECK, CHECK[1:]):
+    for (x1, y1), (x2, y2) in SEGMENTS:
         if dist_to_segment(u, v, x1, y1, x2, y2) <= half:
             return True
     return False
@@ -87,4 +87,5 @@ if __name__ == '__main__':
     out_dir = os.path.dirname(os.path.abspath(__file__))
     write_png(os.path.join(out_dir, 'icon-192.png'), 192)
     write_png(os.path.join(out_dir, 'icon-512.png'), 512)
-    print('wrote icon-192.png and icon-512.png')
+    write_png(os.path.join(out_dir, 'logo-120.png'), 120)  # Google consent screen logo (full-bleed, same mark)
+    print('wrote icon-192.png, icon-512.png and logo-120.png')

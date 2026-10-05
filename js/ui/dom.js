@@ -14,6 +14,13 @@ export function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Animated infinity-loop busy indicator. Path is inlined (not <use>) so the
+// .loop-run stroke can be animated. Inherits colour from its container.
+export function loaderHtml(label = '', cls = '') {
+  const p = 'M24 12c-4-6-8-9-12.5-9a9 9 0 0 0 0 18c4.5 0 8.5-3 12.5-9s8-9 12.5-9a9 9 0 0 1 0 18c-4.5 0-8.5-3-12.5-9z';
+  return `<span class="loop-loader${cls ? ' ' + cls : ''}" role="status"><svg viewBox="0 0 48 24" aria-hidden="true"><path class="loop-track" d="${p}"/><path class="loop-run" pathLength="100" d="${p}"/></svg>${label ? `<span>${esc(label)}</span>` : '<span class="sr-only">Loading</span>'}</span>`;
+}
+
 export function formatDateLong(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(y, m - 1, d);

@@ -1,6 +1,6 @@
 {
-  "name": "Habitly",
-  "short_name": "Habitly",
+  "name": "FueLoop",
+  "short_name": "FueLoop",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
