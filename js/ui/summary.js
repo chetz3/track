@@ -1,5 +1,5 @@
 // Green-day summary viewer (#/summary/:date): a full-screen photo strip with
-// a 30%-wide activity overlay panel. Task 8A.
+// a bottom details overlay (per-step cards, collapsible).
 //
 // Render contract (see app.js): renderSummary receives a container already
 // attached inside #app. It may only write inside it, and must call
@@ -9,7 +9,7 @@
 import * as store from '../store.js';
 import { dayStatus, isEditable, addDays } from '../rules.js';
 import { esc, formatDateShort, hydratePhotos } from './dom.js';
-import { buildDaySummary } from '../summaryModel.js';
+import { buildDaySummary, buildDayDetails } from '../summaryModel.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -79,7 +79,6 @@ function computeStatus(challenge, date, day, todayStr) {
 function slideHtml(photo, index) {
   return `<div class="summary-slide" data-index="${index}">
     <img data-photo-id="${esc(photo.photoId)}" alt="${esc(photo.stepName)}" />
-    <span class="summary-caption">${esc(photo.stepName)}</span>
   </div>`;
 }
 
@@ -130,48 +129,80 @@ function stepPicture(root, photos, dir, nav) {
   else if (photos.length > 1) goToSlide(root, photos, dir); // wrap within the day
 }
 
-function itemHtml(item) {
-  const checkCls = item.complete ? 'summary-check done' : 'summary-check';
-  const checkGlyph = item.complete ? '✓' : '○';
-  const valueHtml = item.value ? `<div class="summary-item-value">${esc(item.value)}</div>` : '';
-  const noteHtml = item.note ? `<div class="summary-item-note">${esc(item.note)}</div>` : '';
-  const photoTagHtml = item.hasPhoto ? `<span class="summary-photo-tag">Photo</span>` : '';
-  return `<div class="summary-item${item.mandatory ? ' mandatory' : ''}">
-    <div class="summary-item-head">
-      <span class="${checkCls}">${checkGlyph}</span>
-      <span class="summary-item-name">${esc(item.name)}</span>
+// ---------- details overlay ----------
+
+const DETAILS_KEY = 'tracker:summaryDetails';
+
+function readDetailsShown() {
+  try { return localStorage.getItem(DETAILS_KEY) !== '0'; } catch { return true; }
+}
+
+function writeDetailsShown(shown) {
+  try { localStorage.setItem(DETAILS_KEY, shown ? '1' : '0'); } catch { /* storage unavailable */ }
+}
+
+// Per-step open/closed choices made this session, keyed by stepId. Steps
+// without a choice default to open for food/workout, closed otherwise.
+const stepOpenState = new Map();
+
+function isStepOpen(detail, type) {
+  return stepOpenState.has(detail.stepId) ? stepOpenState.get(detail.stepId) : (type === 'food' || type === 'workout');
+}
+
+function photoInfoText(photos, idx) {
+  if (!photos.length) return '';
+  const p = photos[idx];
+  return `Photo ${idx + 1} / ${photos.length} · ${p.caption || p.stepName}`;
+}
+
+function rowHtml(row, photoIndex) {
+  const thumb = row.photoId ? `<img class="summary-row-thumb" data-photo-id="${esc(row.photoId)}" alt="" />` : '';
+  const goto = row.photoId && photoIndex >= 0 ? ` data-role="goto-photo" data-photo-index="${photoIndex}"` : '';
+  return `<div class="summary-row${goto ? ' tappable' : ''}"${goto}>
+    ${thumb}
+    <div class="summary-row-text">
+      <div class="summary-row-title">${esc(row.title)}</div>
+      ${row.sub ? `<div class="summary-row-sub">${esc(row.sub)}</div>` : ''}
     </div>
-    ${valueHtml}${noteHtml}${photoTagHtml}
   </div>`;
 }
 
-function photoNavHtml(photos) {
-  if (photos.length <= 1) return '';
-  return `<div class="summary-photo-nav" data-role="photo-nav">
-    <div class="summary-photo-nav-row">
-      <button type="button" class="summary-nav-btn" data-role="prev" aria-label="Previous photo">‹</button>
-      <span class="summary-photo-counter" data-role="photo-counter">1 / ${photos.length}</span>
-      <button type="button" class="summary-nav-btn" data-role="next" aria-label="Next photo">›</button>
+function stepCardHtml(detail, type, photos) {
+  const open = isStepOpen(detail, type);
+  const checkCls = detail.complete ? 'summary-check done' : 'summary-check';
+  const rowsHtml = detail.rows.map((r) => rowHtml(r, r.photoId ? photos.findIndex((p) => p.photoId === r.photoId) : -1)).join('');
+  const noteHtml = detail.note ? `<div class="summary-step-note">${esc(detail.note)}</div>` : '';
+  const bodyHtml = rowsHtml + noteHtml || '<div class="summary-row-sub">Nothing logged</div>';
+  return `<div class="summary-step${detail.mandatory ? ' mandatory' : ''}${open ? ' open' : ''}">
+    <button type="button" class="summary-step-head" data-role="toggle-step" data-step-id="${esc(detail.stepId)}" aria-expanded="${open}">
+      <span class="${checkCls}">${detail.complete ? '✓' : '○'}</span>
+      <span class="summary-step-name">${esc(detail.name)}</span>
+      <span class="summary-step-headline">${esc(detail.headline)}</span>
+      <span class="summary-chevron" aria-hidden="true">›</span>
+    </button>
+    <div class="summary-step-body"${open ? '' : ' hidden'}>${bodyHtml}</div>
+  </div>`;
+}
+
+function detailsHtml(date, status, details, challenge, photos) {
+  const typeOf = (id) => (challenge.steps.find((s) => s.id === id) || {}).type;
+  return `<div class="summary-details" data-role="details">
+    <div class="summary-details-head">
+      <div class="summary-panel-date">${esc(formatDateShort(date))}</div>
+      <span class="pill ${status}">${esc(STATUS_LABELS[status] || status)}</span>
+      <div class="summary-photo-info" data-role="photo-info">${esc(photoInfoText(photos, 0))}</div>
     </div>
-    <div class="summary-photo-name" data-role="photo-name">${esc(photos[0].stepName)}</div>
+    ${details.map((d) => stepCardHtml(d, typeOf(d.stepId), photos)).join('')}
   </div>`;
 }
 
-function panelHtml(date, status, items, photos) {
-  return `<div class="summary-panel">
-    ${photoNavHtml(photos)}
-    <div class="summary-panel-date">${esc(formatDateShort(date))}</div>
-    <span class="pill ${status}">${esc(STATUS_LABELS[status] || status)}</span>
-    <div class="summary-items">${items.map(itemHtml).join('')}</div>
-  </div>`;
-}
-
-function controlsHtml(showEdit) {
+function controlsHtml(showEdit, showDetails = true) {
   const editBtn = showEdit ? `<button type="button" class="summary-edit" data-role="edit">Edit day</button>` : '';
   return `<div class="summary-controls">
     <button type="button" class="summary-close" data-role="close" aria-label="Close">✕</button>
     ${editBtn}
-  </div>`;
+  </div>
+  <button type="button" class="summary-toggle-details" data-role="toggle-details" aria-expanded="${showDetails}">${showDetails ? 'Hide details' : 'Show details'}</button>`;
 }
 
 // ---------- behaviour ----------
@@ -197,10 +228,8 @@ function currentSlideIndex(strip, photoCount) {
 function updateNavUi(root, photos, idx) {
   const dotsWrap = root.querySelector('[data-role="dots"]');
   if (dotsWrap) dotsWrap.querySelectorAll('.summary-dot').forEach((d, i) => d.classList.toggle('active', i === idx));
-  const counterEl = root.querySelector('[data-role="photo-counter"]');
-  if (counterEl) counterEl.textContent = `${idx + 1} / ${photos.length}`;
-  const nameEl = root.querySelector('[data-role="photo-name"]');
-  if (nameEl) nameEl.textContent = photos[idx].stepName;
+  const infoEl = root.querySelector('[data-role="photo-info"]');
+  if (infoEl) infoEl.textContent = photoInfoText(photos, idx);
 }
 
 function wireStrip(root, photos) {
@@ -234,14 +263,34 @@ function wireControls(root, date, photos, nav = { prev: null, next: null }) {
       location.hash = `#/day/${date}`;
       return;
     }
-    if (e.target.closest('[data-role="prev"]')) {
-      goToSlide(root, photos, -1);
+    const toggleDetails = e.target.closest('[data-role="toggle-details"]');
+    if (toggleDetails) {
+      const shown = root.classList.contains('details-off');
+      root.classList.toggle('details-off', !shown);
+      toggleDetails.setAttribute('aria-expanded', String(shown));
+      toggleDetails.textContent = shown ? 'Hide details' : 'Show details';
+      writeDetailsShown(shown);
       return;
     }
-    if (e.target.closest('[data-role="next"]')) {
-      goToSlide(root, photos, 1);
+    const toggleStep = e.target.closest('[data-role="toggle-step"]');
+    if (toggleStep) {
+      const card = toggleStep.closest('.summary-step');
+      const open = toggleStep.getAttribute('aria-expanded') !== 'true';
+      toggleStep.setAttribute('aria-expanded', String(open));
+      card.classList.toggle('open', open);
+      const body = card.querySelector('.summary-step-body');
+      if (body) body.hidden = !open;
+      stepOpenState.set(toggleStep.dataset.stepId, open);
       return;
     }
+    const gotoPhoto = e.target.closest('[data-role="goto-photo"]');
+    if (gotoPhoto) {
+      const strip = root.querySelector('[data-role="photos-strip"]');
+      const i = Number(gotoPhoto.dataset.photoIndex);
+      if (strip && Number.isFinite(i)) strip.scrollTo({ left: i * strip.clientWidth, behavior: 'smooth' });
+      return;
+    }
+    if (e.target.closest('.summary-details')) return;
     if (e.target.closest('[data-role="pic-prev"]')) {
       stepPicture(root, photos, -1, nav);
       return;
@@ -278,13 +327,15 @@ export async function renderSummary(root, dateParam) {
   const day = store.getDay(challenge.id, date);
   const status = computeStatus(challenge, date, day, todayStr);
   const summary = buildDaySummary(challenge, day);
+  const details = buildDayDetails(challenge, day, { flexOn: store.flexDatesFor(challenge.id).has(date) });
+  const detailsShown = readDetailsShown();
   const showEdit = isEditable(date, todayStr);
 
   const nav = neighbourDates(challenge, date, todayStr);
-  root.innerHTML = `<div class="summary-viewer">
+  root.innerHTML = `<div class="summary-viewer${detailsShown ? '' : ' details-off'}">
     ${photosHtml(summary.photos, nav)}
-    ${controlsHtml(showEdit)}
-    ${panelHtml(date, status, summary.items, summary.photos)}
+    ${controlsHtml(showEdit, detailsShown)}
+    ${detailsHtml(date, status, details, challenge, summary.photos)}
   </div>`;
 
   const viewer = root.querySelector('.summary-viewer');

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v43';
+const CACHE_NAME = 'tracker-shell-v44';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',

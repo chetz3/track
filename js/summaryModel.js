@@ -3,6 +3,8 @@
 // viewer renders.
 
 import { isStepComplete, isNumberValue, diffDays } from './rules.js';
+import { targetFor } from './fitness.js';
+import { macroInlineLine, mealsMacros } from './foodLogic.js';
 
 export function buildDaySummary(challenge, day) {
   const steps = (day && day.steps) || {};
@@ -14,9 +16,66 @@ export function buildDaySummary(challenge, day) {
     if (e && e.note) item.note = e.note;
     item.hasPhoto = !!(e && e.photoId);
     if (item.hasPhoto) photos.push({ stepId: s.id, stepName: s.name, photoId: e.photoId });
+    if (e && Array.isArray(e.meals)) {
+      for (const meal of e.meals) {
+        if (meal && meal.photoId) {
+          photos.push({ stepId: s.id, stepName: s.name, photoId: meal.photoId, caption: `${meal.dish || 'Meal'} · ${meal.calories} kcal` });
+        }
+      }
+    }
     return item;
   });
   return { photos, items };
+}
+
+// Per-step detail rows for the summary viewer's overlay: one entry per
+// challenge step, in order.
+export function buildDayDetails(challenge, day, { flexOn = false } = {}) {
+  const steps = (day && day.steps) || {};
+  return challenge.steps.map((s) => {
+    const e = steps[s.id];
+    const target = targetFor(day, s);
+    const unit = (s.number && s.number.unit) || '';
+    const unitSfx = unit ? ` ${unit}` : '';
+    const hasValue = !!(e && isNumberValue(e.value));
+    const complete = isStepComplete(s, e, target, { flex: flexOn });
+
+    let headline;
+    if (s.goal && Number.isFinite(target)) {
+      headline = hasValue ? `${e.value} / ${target}${unitSfx}` : `Target ${target}${unitSfx}`;
+    } else if (hasValue) {
+      headline = `${s.number && s.number.label ? s.number.label + ': ' : ''}${e.value}${unitSfx}`;
+    } else if (e && e.done) {
+      headline = 'Done';
+    } else {
+      headline = '—';
+    }
+
+    const rows = [];
+    if (s.type === 'food') {
+      const meals = (e && Array.isArray(e.meals)) ? e.meals : [];
+      for (const meal of meals) {
+        const row = { title: meal.dish || 'Meal', sub: `${meal.calories} kcal · ${macroInlineLine(meal.macros)}` };
+        if (meal.photoId) row.photoId = meal.photoId;
+        rows.push(row);
+      }
+      if (meals.length) {
+        const total = meals.reduce((t, m) => t + (Number.isFinite(m && m.calories) ? m.calories : 0), 0);
+        rows.push({ title: 'Total', sub: `${Math.round(total)} kcal · ${macroInlineLine(mealsMacros(meals))}` });
+      }
+    } else if (s.type === 'workout') {
+      const sessions = (e && Array.isArray(e.sessions)) ? e.sessions : [];
+      for (const ses of sessions) {
+        rows.push({ title: ses.type, sub: `${ses.minutes} min · ${ses.intensity} · ${ses.kcal} kcal` });
+      }
+    } else if (hasValue) {
+      rows.push({ title: (s.number && s.number.label) || s.name, sub: `${e.value}${unitSfx}` });
+    }
+
+    const out = { stepId: s.id, name: s.name, mandatory: !!s.mandatory, complete, headline, rows };
+    if (e && e.note) out.note = e.note;
+    return out;
+  });
 }
 
 // Pure model for the Stats "Photo progress" tile grid. Picks every day (of
