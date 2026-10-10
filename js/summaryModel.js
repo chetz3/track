@@ -5,6 +5,7 @@
 import { isStepComplete, isNumberValue, diffDays } from './rules.js';
 import { targetFor } from './fitness.js';
 import { macroInlineLine, mealsMacros } from './foodLogic.js';
+import { mealTimeLabel, sortMealsByAt } from './planLogic.js';
 
 export function buildDaySummary(challenge, day) {
   const steps = (day && day.steps) || {};
@@ -54,8 +55,9 @@ export function buildDayDetails(challenge, day, { flexOn = false } = {}) {
     const rows = [];
     if (s.type === 'food') {
       const meals = (e && Array.isArray(e.meals)) ? e.meals : [];
-      for (const meal of meals) {
-        const row = { title: meal.dish || 'Meal', sub: `${meal.calories} kcal · ${macroInlineLine(meal.macros)}` };
+      for (const meal of sortMealsByAt(meals)) {
+        const time = mealTimeLabel(meal.at);
+        const row = { title: time ? `${time} · ${meal.dish || 'Meal'}` : (meal.dish || 'Meal'), sub: `${meal.calories} kcal · ${macroInlineLine(meal.macros)}` };
         if (meal.photoId) row.photoId = meal.photoId;
         rows.push(row);
       }

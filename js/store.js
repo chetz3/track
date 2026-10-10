@@ -8,6 +8,7 @@ import { addDays, isEditable, evaluateAttempt, mandatorySnapshot, flexDates } fr
 import { baseTargets } from './fitness.js';
 import { dayKey } from './migrate.js';
 import { deletePhoto } from './photos.js';
+import { isPlannableDate } from './planLogic.js';
 import { nextSelectedId, applyStepPatch, resnapshotToday, validateChallengeInput } from './storeLogic.js';
 
 const SELECTED_KEY = 'tracker:selected';
@@ -211,8 +212,9 @@ export async function updateStep(challengeId, date, stepId, patch) {
 }
 
 // Writes a food step's `planned` placeholders (docs §9) for `date`, which —
-// unlike updateStep — may be *today or tomorrow*: "Tomorrow's plan can be
-// edited today, even though logging for that day stays locked" (isEditable
+// unlike updateStep — may be any day from today through today + 6 (the Plan
+// tab's range; see planLogic.js's isPlannableDate): a future plan can be
+// edited today, even though logging for that day stays locked (isEditable
 // only allows today/yesterday). Deliberately never touches
 // mandatoryStepIds/targets (compare updateStep, which snapshots them on a
 // day's first edit): a placeholder never counts toward calories, macros or
@@ -227,7 +229,7 @@ export async function updatePlanned(challengeId, date, stepId, planned) {
   const challenge = state.challenges.find((c) => c.id === challengeId);
   if (!challenge) throw new Error('This day can no longer be edited.');
   const t = today();
-  if (date !== t && date !== addDays(t, 1)) throw new Error('This day can no longer be edited.');
+  if (!isPlannableDate(date, t)) throw new Error('This day can no longer be edited.');
   if (isOutsideDisplayAttempt(challengeId, challenge, date)) throw new Error('This day can no longer be edited.');
 
   const oldDay = getDay(challengeId, date);

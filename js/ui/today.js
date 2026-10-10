@@ -14,6 +14,7 @@ import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macr
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
+import { mealTimeLabel, sortMealsByAt, mergeAddToExisting, replaceKeepingLogged } from '../planLogic.js';
 import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey } from '../mealPlan.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -323,7 +324,7 @@ function mealRowHtml(step, meal, fieldCtx) {
     <img class="thumb thumb-meal" data-photo-id="${esc(meal.photoId)}" alt="" />
     <div class="row-label">
       <div>${esc(meal.dish || 'Meal')}</div>
-      <div class="item-sub">${esc(macroDotLine(meal.macros))}</div>
+      <div class="item-sub">${esc([mealTimeLabel(meal.at), macroDotLine(meal.macros)].filter(Boolean).join(' · '))}</div>
     </div>
     <span>${esc(meal.calories)} kcal</span>
     <button type="button" data-role="meal-delete" data-step-id="${esc(step.id)}" data-meal-id="${esc(meal.id)}" aria-label="Remove meal">×</button>
@@ -444,7 +445,7 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
   const meals = Array.isArray(entry.meals) ? entry.meals : [];
   const analyzing = savingByKey.has(key);
-  const mealsHtml = meals.map((m) => mealRowHtml(step, m, fieldCtx)).join('');
+  const mealsHtml = sortMealsByAt(meals).map((m) => mealRowHtml(step, m, fieldCtx)).join('');
   const totalHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <span class="row-label">Total · <span data-count="${esc(fieldCtx.challengeId)}:${esc(fieldCtx.date)}:${esc(step.id)}:kcal">${esc(mealsTotal(meals))}</span> kcal</span>
   </div>`;
@@ -1104,8 +1105,8 @@ async function handlePlannedDelete(btn) {
   }
 }
 
-function planMealSheetBodyHtml(state, slots, isEdit) {
-  const dateRow = isEdit ? '' : `<div class="row">
+function planMealSheetBodyHtml(state, slots, isEdit, fixedDate) {
+  const dateRow = (isEdit || fixedDate) ? '' : `<div class="row">
     <span class="field-label">Day</span>
     <div class="segmented">
       <label><input type="radio" name="plan-meal-date" value="today" data-role="plan-meal-date" ${state.dateChoice === 'today' ? 'checked' : ''}><span>Today</span></label>
@@ -1144,7 +1145,7 @@ function planMealSheetBodyHtml(state, slots, isEdit) {
 // (its date is fixed — only slot/dish/kcal are editable once created).
 // Saves through store.updatePlanned, same as the AI sheet's "Add to
 // tomorrow's plan"/"Add all" below.
-function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }) {
+export function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing, fixedDate = null, source = 'manual' }) {
   const isEdit = !!existing;
   const slots = (schedule && Array.isArray(schedule.slots)) ? schedule.slots : [];
   const initialSlotIndex = isEdit ? Math.max(0, slots.findIndex((s) => s.name === existing.slot)) : 0;
@@ -1158,7 +1159,7 @@ function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }
   };
 
   let sheetEl = null;
-  const render = () => `<div id="plan-meal-root">${planMealSheetBodyHtml(state, slots, isEdit)}</div>`;
+  const render = () => `<div id="plan-meal-root">${planMealSheetBodyHtml(state, slots, isEdit, fixedDate)}</div>`;
 
   const close = openSheet({
     title: isEdit ? 'Edit planned meal' : 'Plan a meal',
@@ -1172,6 +1173,7 @@ function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }
   }
 
   function targetDate() {
+    if (fixedDate) return fixedDate;
     return isEdit ? date : (state.dateChoice === 'tomorrow' ? addDays(date, 1) : date);
   }
 
@@ -1200,11 +1202,15 @@ function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }
       const list = Array.isArray(entry.planned) ? entry.planned.slice() : [];
       if (isEdit) {
         const idx = list.findIndex((p) => p.id === existing.id);
-        if (idx !== -1) list[idx] = { ...existing, slot: slot.name, time: slot.time, dish, kcal: Math.round(kcalNum) };
+        if (idx !== -1) {
+          // Keep a custom time when the slot itself didn't change.
+          const sameSlot = slot.name === existing.slot;
+          list[idx] = { ...existing, slot: slot.name, time: sameSlot && existing.time ? existing.time : slot.time, dish, kcal: Math.round(kcalNum) };
+        }
       } else {
         list.push({
           id: makePlannedId(), slot: slot.name, time: slot.time, dish, kcal: Math.round(kcalNum),
-          macros: { protein: 0, carbs: 0, fat: 0, fiber: 0 }, source: 'manual',
+          macros: { protein: 0, carbs: 0, fat: 0, fiber: 0 }, source,
         });
       }
       await store.updatePlanned(challengeId, targetD, foodStepId, list);
@@ -1302,7 +1308,7 @@ function bodyNoteFrom(bodyCheck) {
 // persisted, so reopening the sheet later always offers every meal again —
 // adding the same dish twice just leaves two placeholders, which the user
 // can delete like any other (see plannedRowHtml/handlePlannedDelete).
-function planMealRowHtml(meal, index, added) {
+function planMealRowHtml(meal, index, added, dayLabel) {
   const macroLine = macroInlineLine({ protein: meal.protein, carbs: meal.carbs, fat: meal.fat, fiber: meal.fiber });
   const swapHtml = meal.swapFor ? `<div class="item-sub">Swap: ${esc(meal.swapFor)}</div>` : '';
   return `<div class="row">
@@ -1314,7 +1320,7 @@ function planMealRowHtml(meal, index, added) {
     <span>${esc(meal.kcal)} kcal</span>
   </div>
   <div class="row">
-    <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-add-meal" data-index="${index}"${added ? ' disabled' : ''}>${added ? 'Added to tomorrow’s plan' : "Add to tomorrow's plan"}</button>
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-add-meal" data-index="${index}"${added ? ' disabled' : ''}>${added ? (dayLabel ? `Added to ${esc(dayLabel)}` : 'Added to tomorrow’s plan') : (dayLabel ? `Add to ${esc(dayLabel)}` : "Add to tomorrow's plan")}</button>
   </div>`;
 }
 
@@ -1359,6 +1365,26 @@ function groceryHtml(state) {
   ${state.shareMsg ? `<p class="section-footer">${esc(state.shareMsg)}</p>` : ''}`;
 }
 
+// "Add all" button; from the Plan tab (state.askMode) it first asks whether to
+// add to the day's existing plan or replace it (replace confirms inline).
+function addAllAskHtml(state, addAllDisabled, allAdded) {
+  const label = state.dayLabel ? esc(state.dayLabel) : 'tomorrow’s plan';
+  if (state.addAllStage === 'ask') {
+    return `<div class="section-footer">Add these meals to ${label}:</div>
+    <button type="button" class="btn btn-primary" data-role="plan-add-existing">Add to existing</button>
+    <button type="button" class="btn btn-secondary" data-role="plan-replace-ask">Replace this day’s plan</button>
+    <button type="button" class="btn btn-secondary" data-role="plan-add-cancel">Cancel</button>`;
+  }
+  if (state.addAllStage === 'confirm') {
+    return `<div class="section-footer">Replace ${label}? Meals you already logged are kept.</div>
+    <div class="btn-pair">
+      <button type="button" class="btn btn-secondary" data-role="plan-add-cancel">No</button>
+      <button type="button" class="btn btn-primary" data-role="plan-replace-yes">Yes, replace</button>
+    </div>`;
+  }
+  return `<button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : (state.dayLabel ? `Add all to ${label}` : 'Add all to tomorrow’s plan')}</button>`;
+}
+
 function mealPlanBodyHtml(state) {
   if (state.stage === 'pick' && !state.loading) {
     return `${prefPickerHtml(state)}
@@ -1372,7 +1398,7 @@ function mealPlanBodyHtml(state) {
     return `<div class="section-footer error">${esc(state.error)}</div>
       <button type="button" class="btn btn-primary" data-role="meal-plan-close">Close</button>`;
   }
-  const mealsHtml = state.meals.map((m, i) => planMealRowHtml(m, i, state.addedIndices.has(i))).join('');
+  const mealsHtml = state.meals.map((m, i) => planMealRowHtml(m, i, state.addedIndices.has(i), state.dayLabel)).join('');
   const targetsHtml = targetsLineHtml(state.targets, state.totals);
   const warningHtml = state.warning ? `<p class="section-footer error">${esc(state.warning)}</p>` : '';
   const bodyNote = bodyNoteFrom(state.bodyCheck);
@@ -1386,7 +1412,7 @@ function mealPlanBodyHtml(state) {
     ${bodyNote ? `<p class="section-footer">${esc(bodyNote)}</p>` : ''}
     ${linesHtml('Tips', state.tips)}
     ${groceryHtml(state)}
-    <button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : 'Add all to tomorrow’s plan'}</button>
+    ${addAllAskHtml(state, addAllDisabled, allAdded)}
     ${addAllError}
     <div class="btn-pair">
       <button type="button" class="btn btn-secondary" data-role="meal-plan-new"${state.busy ? ' disabled' : ''}>${state.busy ? loaderHtml('Thinking…') : 'New ideas'}</button>
@@ -1400,7 +1426,12 @@ function mealPlanBodyHtml(state) {
 // anything; otherwise (the "Today's plan" row) it shows the saved plan
 // straight away, still refreshed against the current targets/body-check text
 // (both pure, no network — see js/mealPlan.js).
-function openMealPlanSheet(ctx, opts = {}) {
+//
+// `opts.dateLabel` (e.g. "Mon 13 Oct") retargets the sheet at a day other
+// than tomorrow — the Plan tab passes it with `opts.forDate`; leaving it off
+// keeps the Today wording. `opts.askMode` makes "Add all" ask Add-to-existing
+// vs Replace (Today keeps its plain append).
+export function openMealPlanSheet(ctx, opts = {}) {
   const challenge = store.state.challenges.find((c) => c.id === ctx.challengeId);
   if (!challenge) return;
   const existing = planFromChallenge(challenge);
@@ -1441,13 +1472,16 @@ function openMealPlanSheet(ctx, opts = {}) {
     // addMealToPlan/addAllMealsToPlan. Reset whenever state.meals changes.
     addedIndices: new Set(),
     addError: '',
+    dayLabel: opts.dateLabel || '',
+    askMode: !!opts.askMode,
+    addAllStage: null,
   };
 
   let sheetEl = null;
   const render = () => `<div id="meal-plan-root">${mealPlanBodyHtml(state)}</div>`;
 
   const close = openSheet({
-    title: "Tomorrow's meal plan",
+    title: state.dayLabel ? `Meal plan · ${state.dayLabel}` : "Tomorrow's meal plan",
     bodyHtml: render(),
     onMount: (el) => { sheetEl = el; wire(el); },
   });
@@ -1471,7 +1505,7 @@ function openMealPlanSheet(ctx, opts = {}) {
       const freshChallenge = store.state.challenges.find((c) => c.id === ctx.challengeId) || challenge;
       const freshDaysMap = store.state.days[ctx.challengeId] || {};
       const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date, state.pref);
-      const result = await suggestMeals(freshInput, avoidDishes);
+      const result = await suggestMeals(freshInput, avoidDishes, state.dayLabel ? `${state.dayLabel} (${state.forDate})` : undefined);
       await store.patchChallenge(ctx.challengeId, {
         mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips, fixes: result.fixes, pref: state.pref, have: [] },
       });
@@ -1525,12 +1559,16 @@ function openMealPlanSheet(ctx, opts = {}) {
   // Appends placeholders to tomorrow's (state.forDate's) food-step `planned`
   // list via store.updatePlanned — same store call the manual "Plan a meal"
   // sheet uses (js/store.js's updatePlanned works for today or tomorrow).
-  async function addPlaceholders(newPlaceholders) {
+  async function addPlaceholders(newPlaceholders, mode = 'append') {
     const foodStep = (challenge.steps || []).find((s) => s.type === 'food');
     if (!foodStep) throw new Error("This challenge has no Food step to plan.");
     const day = store.getDay(ctx.challengeId, state.forDate);
     const entry = (day.steps && day.steps[foodStep.id]) || {};
-    const list = (Array.isArray(entry.planned) ? entry.planned : []).concat(newPlaceholders);
+    const current = Array.isArray(entry.planned) ? entry.planned : [];
+    let list;
+    if (mode === 'replace') list = replaceKeepingLogged(current, entry.meals, newPlaceholders);
+    else if (mode === 'merge') list = mergeAddToExisting(current, newPlaceholders).list;
+    else list = current.concat(newPlaceholders);
     await store.updatePlanned(ctx.challengeId, state.forDate, foodStep.id, list);
   }
 
@@ -1540,7 +1578,7 @@ function openMealPlanSheet(ctx, opts = {}) {
     if (!meal) return;
     state.addError = '';
     try {
-      await addPlaceholders([aiMealToPlaceholder(meal)]);
+      await addPlaceholders([aiMealToPlaceholder(meal)], state.askMode ? 'merge' : 'append');
       state.addedIndices.add(index);
       markSaved(ctx);
       rerenderSheet();
@@ -1551,12 +1589,16 @@ function openMealPlanSheet(ctx, opts = {}) {
     }
   }
 
-  async function addAllMealsToPlan() {
-    const toAdd = state.meals.map((m, i) => i).filter((i) => !state.addedIndices.has(i));
-    if (!toAdd.length) return;
+  async function addAllMealsToPlan(mode = 'append') {
+    // Replace re-adds every suggested meal, even ones added one-by-one before.
+    const toAdd = mode === 'replace'
+      ? state.meals.map((m, i) => i)
+      : state.meals.map((m, i) => i).filter((i) => !state.addedIndices.has(i));
+    state.addAllStage = null;
+    if (!toAdd.length) { rerenderSheet(); return; }
     state.addError = '';
     try {
-      await addPlaceholders(toAdd.map((i) => aiMealToPlaceholder(state.meals[i])));
+      await addPlaceholders(toAdd.map((i) => aiMealToPlaceholder(state.meals[i])), mode);
       for (const i of toAdd) state.addedIndices.add(i);
       markSaved(ctx);
       rerenderSheet();
@@ -1656,8 +1698,14 @@ function openMealPlanSheet(ctx, opts = {}) {
         return;
       }
       if (e.target.closest('[data-role="plan-add-all"]')) {
+        if (state.askMode) { state.addAllStage = 'ask'; rerenderSheet(); return; }
         addAllMealsToPlan();
+        return;
       }
+      if (e.target.closest('[data-role="plan-add-existing"]')) { addAllMealsToPlan('merge'); return; }
+      if (e.target.closest('[data-role="plan-replace-ask"]')) { state.addAllStage = 'confirm'; rerenderSheet(); return; }
+      if (e.target.closest('[data-role="plan-replace-yes"]')) { addAllMealsToPlan('replace'); return; }
+      if (e.target.closest('[data-role="plan-add-cancel"]')) { state.addAllStage = null; rerenderSheet(); }
     });
   }
 }

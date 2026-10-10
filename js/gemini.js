@@ -268,12 +268,12 @@ function scheduleLines(schedule) {
   return { count: slots.length || 1, slotList, windowLine };
 }
 
-function suggestPrompt(input, avoidDishes) {
+function suggestPrompt(input, avoidDishes, forDay = 'tomorrow') {
   const { count, slotList, windowLine } = scheduleLines(input.profile && input.profile.schedule);
   const avoidLine = Array.isArray(avoidDishes) && avoidDishes.length
     ? `\nDo not repeat these dishes from the previous plan: ${avoidDishes.join(', ')}.`
     : '';
-  return `You are a nutrition planner. Suggest a ${count}-meal plan for tomorrow for this person, one dish for each of these exact time slots: ${slotList}.
+  return `You are a nutrition planner. Suggest a ${count}-meal plan for ${forDay} for this person, one dish for each of these exact time slots: ${slotList}.
 Rules, in this order:
 1. Stay in the cuisine they actually eat. Work out their eating style from recentDishes and yesterday.dishes (e.g. South Indian: idli, dosa, ragi mudde, sambar, rice + curry), with profile.cuisine as a hint and profile.location for what is common and available there. Every dish must be one people in that region routinely eat at home or in local eateries. Never switch cuisine: no Italian, Mexican, continental or other out-of-pattern dishes for someone who eats South Indian food.
 2. Suggest familiar, similar dishes, not novelty: the same kinds of dishes they already eat, or close local variants of them, made healthier (e.g. more dal/eggs/chicken/paneer, less rice, more vegetables, less oil).
@@ -299,7 +299,7 @@ Respond only with JSON matching the schema.`;
 // them. Totals are always recomputed in code (planTotals), never trusted
 // from the model, and a warning is attached (not thrown) when they land
 // outside the target ±10% band — see docs §5.
-export async function suggestMeals(input, avoidDishes) {
+export async function suggestMeals(input, avoidDishes, forDay) {
   let parsed = null;
   // Dev-only canned response (js/dev/mockSuggest.js), never on the live site.
   let mockOn = false;
@@ -309,7 +309,7 @@ export async function suggestMeals(input, avoidDishes) {
     if (isDevHost()) parsed = await (await import('./dev/mockSuggest.js')).mockSuggest(input);
   }
   if (!parsed) {
-    const parts = [{ text: suggestPrompt(input, avoidDishes) }];
+    const parts = [{ text: suggestPrompt(input, avoidDishes, forDay) }];
     parsed = await callGemini(parts, SUGGEST_SCHEMA, { offlineMessage: "You're offline. Connect to get meal suggestions." });
   }
   const plan = parseMealPlan(parsed);

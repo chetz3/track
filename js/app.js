@@ -16,6 +16,7 @@ import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 import { renderSummary } from './ui/summary.js';
 import { renderStats } from './ui/stats.js';
+import { renderPlanner } from './ui/planner.js';
 import { getGeminiKey } from './gemini.js';
 import { openAiKeySheet } from './ui/aiKeySheet.js';
 import { startReminders } from './reminderRunner.js';
@@ -39,6 +40,7 @@ function placeholder(title) {
 // individual entries for the real screen module's render function.
 const ROUTES = {
   today: renderToday,
+  plan: renderPlanner,
   day: (root, params) => renderDay(root, params.date),
   calendar: (root, params) => renderCalendar(root, params.month),
   overview: renderOverview,
@@ -64,6 +66,8 @@ function matchRoute() {
     case undefined:
     case 'today':
       return { top: 'today', key: 'today', params: {} };
+    case 'plan':
+      return { top: 'plan', key: 'plan', params: {} };
     case 'day':
       return { top: 'day', key: 'day', params: { date: second || store.today() } };
     case 'calendar':
@@ -85,6 +89,7 @@ function matchRoute() {
 
 function tabForTop(top) {
   if (top === 'today') return 'today';
+  if (top === 'plan') return 'plan';
   if (top === 'stats') return 'stats';
   if (top === 'challenges') return 'challenges';
   return 'calendar'; // day, calendar, summary

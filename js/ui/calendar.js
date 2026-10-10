@@ -5,7 +5,7 @@
 
 import * as store from '../store.js';
 import { dayStatus, addDays, weekStatus } from '../rules.js';
-import { esc, formatMonthLong, formatDateShort } from './dom.js';
+import { esc, formatMonthLong, formatDateShort, icon } from './dom.js';
 
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -108,10 +108,11 @@ export async function renderCalendar(root, yyyyMm) {
 
 // ---------- overview (#/overview) ----------
 
+// Week result as an icon badge: [css class, sprite icon or '', aria-label stem].
 function badgeFor(status) {
-  if (status === 'green') return ['green', 'Pass'];
-  if (status === 'red') return ['red', 'Fail'];
-  return ['pending', '–'];
+  if (status === 'green') return ['green', 'check', 'passed'];
+  if (status === 'red') return ['red', 'x', 'failed'];
+  return ['pending', '', 'in progress'];
 }
 
 function legendHtml() {
@@ -186,7 +187,7 @@ export async function renderOverview(root) {
   const weeks = buildFullOverview(challenge, attempt, todayStr);
 
   const weeksHtml = weeks.map((week, i) => {
-    const [cls, label] = badgeFor(week.status);
+    const [cls, glyph, word] = badgeFor(week.status);
     const daysHtml = week.dates.map((date, di) => {
       const status = week.statuses[di];
       return `<button type="button" class="ov-day ${status}" data-role="ov-day" data-date="${esc(date)}" data-status="${esc(status)}" aria-label="${esc(formatDateShort(date))}"></button>`;
@@ -196,7 +197,7 @@ export async function renderOverview(root) {
     return `<div class="ov-week">
       <span class="ov-week-label">W${i + 1}</span>
       ${daysHtml}${padHtml}
-      <span class="pill ov-badge ${cls}">${label}</span>
+      <span class="ov-result ${cls}" role="img" aria-label="Week ${i + 1} ${word}">${glyph ? icon(glyph) : ''}</span>
     </div>`;
   }).join('');
 

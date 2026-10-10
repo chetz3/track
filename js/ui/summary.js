@@ -25,7 +25,7 @@ const STATUS_LABELS = { green: 'Complete', red: 'Missed', pending: 'In progress'
 // when the summary route was the very first thing this tab loaded (a
 // deep link/bookmark straight onto #/summary/:date), where back() could
 // leave the app entirely.
-const KNOWN_TOPS = ['', 'today', 'day', 'calendar', 'overview', 'stats', 'challenges', 'summary'];
+const KNOWN_TOPS = ['', 'today', 'plan', 'day', 'calendar', 'overview', 'stats', 'challenges', 'summary'];
 function isInAppHash(hash) {
   const top = hash.replace(/^#\/?/, '').split('/')[0];
   return KNOWN_TOPS.includes(top);
