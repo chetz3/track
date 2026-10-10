@@ -22,6 +22,9 @@ import { esc, hydratePhotos } from './dom.js';
 import { collectNumberSeries, trendDomain, ringStats, numberSummary } from '../chartMath.js';
 import { buildPhotoProgress } from '../summaryModel.js';
 import { isFoodStep, mealsTotal, mealsMacros, macroDotLine } from '../foodLogic.js';
+import { addDays } from '../rules.js';
+import { weightSeries, smoothWeights, trendStatus } from '../trend.js';
+import { openReviewEntry } from './reviewSheet.js';
 
 // ---------- resize handling (module-level, registered once) ----------
 
@@ -49,6 +52,92 @@ function scheduleResizeRerender() {
 }
 
 window.addEventListener('resize', scheduleResizeRerender);
+
+// ---------- weight trend (Plateau Coach R1) ----------
+
+const TREND_RANGE_KEY = 'tracker:trendRange';
+const TREND_RANGES = { 14: 14, 28: 28, all: Infinity };
+
+function getTrendRange() {
+  try {
+    const v = localStorage.getItem(TREND_RANGE_KEY);
+    if (v in TREND_RANGES) return v;
+  } catch (_) { /* storage blocked */ }
+  return '14';
+}
+
+function setTrendRange(v) {
+  try { localStorage.setItem(TREND_RANGE_KEY, v); } catch (_) { /* storage blocked */ }
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function shortDate(dateStr) {
+  const [, m, d] = dateStr.split('-').map(Number);
+  return `${d} ${MONTHS[m - 1]}`;
+}
+
+function fmtKgChange(n) {
+  const v = Math.abs(Math.round(n * 10) / 10);
+  return `${n > 0 ? '+' : n < 0 ? '−' : ''}${v} kg`;
+}
+
+function trendPill(t) {
+  switch (t.status) {
+    case 'losing': return { cls: 'green', label: 'Losing' };
+    case 'gaining': return { cls: 'red', label: 'Gaining' };
+    case 'fluctuating': return { cls: 'pending', label: `Fluctuating ±${Math.round((t.rangeKg / 2) * 10) / 10} kg` };
+    case 'plateau': return { cls: 'pending', label: t.stalledSince ? `Plateau since ${shortDate(t.stalledSince)}` : 'Plateau' };
+    default: return { cls: 'future', label: 'Need more weigh-ins' };
+  }
+}
+
+function weightTrendHtml(t, range) {
+  const pill = trendPill(t);
+  const rangeBtns = Object.keys(TREND_RANGES).map((k) =>
+    `<button type="button" data-role="trend-range" data-range="${k}" aria-pressed="${k === range}">${k === 'all' ? 'All' : k}</button>`).join('');
+  const bits = [];
+  if (t.status !== 'no-data') {
+    if (t.slopeKgPerWeek !== null) bits.push(`${esc(fmtKgChange(t.slopeKgPerWeek))}/week`);
+    if (t.adherencePct !== null) bits.push(`${esc(t.adherencePct)} % of days on plan`);
+  }
+  const status = `<div class="trend-status"><span class="pill ${pill.cls}">${esc(pill.label)}</span>${bits.map((b) => `<span>${b}</span>`).join('')}</div>`;
+  // Expected/actual are weight *loss* (positive = lost); show them as changes.
+  const gap = t.expectedLossKg !== null && t.actualLossKg !== null
+    ? `<p class="trend-status-sub">Expected ${esc(fmtKgChange(-t.expectedLossKg))} · actual ${esc(fmtKgChange(-t.actualLossKg))}</p>`
+    : '';
+  const empty = t.status === 'no-data'
+    ? `<p class="trend-status-sub">Weigh in at least 4× a week — same time, after the toilet, before food — to see your real trend.</p>`
+    : '';
+  let action = '';
+  if (t.status === 'losing') action = `<p class="trend-status-sub">You're on track.</p>`;
+  else if (t.status !== 'no-data') action = `<button type="button" class="btn btn-secondary" data-role="trend-why">Why isn't it moving?</button>`;
+  return `<div class="section" data-trend-section>
+    <div class="trend-head"><p class="section-header">Weight trend</p><div class="trend-range" role="group" aria-label="Range">${rangeBtns}</div></div>
+    <div class="group trend-group" data-weight-trend></div>
+    ${status}${gap}${empty}${action}
+  </div>`;
+}
+
+let trendRoot = null; // the root the delegated listener below reads from
+
+function wireWeightTrend(root) {
+  trendRoot = root;
+  if (root.__trendWired) return;
+  root.__trendWired = true;
+  root.addEventListener('click', (e) => {
+    const rangeBtn = e.target.closest('[data-role="trend-range"]');
+    if (rangeBtn) {
+      setTrendRange(rangeBtn.dataset.range);
+      renderStats(trendRoot);
+      return;
+    }
+    if (e.target.closest('[data-role="trend-why"]')) {
+      const challenge = store.selected();
+      if (challenge) openReviewEntry(challenge);
+    }
+  });
+}
 
 // ---------- photo progress (gallery) ----------
 
@@ -210,6 +299,13 @@ export async function renderStats(root) {
   const series = collectNumberSeries(challenge, daysMap);
   const photoProgress = photoProgressHtml(challenge, attempt, daysMap);
 
+  const hasBody = challenge.steps.some((st) => st.type === 'body');
+  const range = getTrendRange();
+  const trend = hasBody
+    ? trendStatus(challenge, daysMap, store.today(), { windowDays: TREND_RANGES[range], startDate: attempt.startDate })
+    : null;
+  const weightTrend = trend ? weightTrendHtml(trend, range) : '';
+
   const seriesHtml = series.length
     ? series.map((s, i) => {
       const unitSuffix = s.step.number.unit ? ` (${esc(s.step.number.unit)})` : '';
@@ -227,6 +323,7 @@ export async function renderStats(root) {
   root.innerHTML = `
     <h1 class="large-title">Stats</h1>
     <p class="subtitle">${esc(challenge.name)}</p>
+    ${weightTrend}
     <div class="section">
       <p class="section-header">Progress</p>
       <div class="group ring-group">
@@ -257,6 +354,22 @@ export async function renderStats(root) {
   for (const [i, s] of series.entries()) {
     const mount = root.querySelector(`[data-trend-index="${i}"]`);
     if (mount) renderTrendChart(mount, { title: s.step.name, unit: s.step.number.unit, points: s.points, color: stepColorVar(s.step) });
+  }
+
+  if (trend) {
+    const mount = root.querySelector('[data-weight-trend]');
+    if (mount) {
+      const todayStr = store.today();
+      const from = Number.isFinite(TREND_RANGES[range]) ? addDays(todayStr, -(TREND_RANGES[range] - 1)) : '';
+      const smoothed = smoothWeights(weightSeries(challenge, daysMap)
+        .filter((p) => p.date >= attempt.startDate && p.date <= todayStr))
+        .filter((p) => p.date >= from);
+      renderWeightTrendChart(mount, {
+        points: smoothed.map((p) => ({ date: p.date, value: Math.round(p.kg * 10) / 10 })),
+        trend: smoothed.map((p) => ({ date: p.date, value: Math.round(p.trendKg * 100) / 100 })),
+      });
+    }
+    wireWeightTrend(root);
   }
 
   wirePhotoProgress(root);
@@ -377,4 +490,57 @@ export function renderTrendChart(el, { title, unit, points, color = 'var(--accen
       .on('zoom', (event) => { x = event.transform.rescaleX(x0); draw(); });
     svg.call(zoom).on('dblclick.zoom', () => svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity));
   }
+}
+
+// ---------- weight trend chart ----------
+
+// Raw weigh-ins as faint dots, the EWMA trend as a line. `points` and `trend`
+// are [{date, value}] over the same dates. Same axes/tooltip/resize contract
+// as renderTrendChart (re-rendered by the module's width-aware resize handler).
+export function renderWeightTrendChart(el, { points, trend }) {
+  const d3 = window.d3;
+  if (!points || points.length === 0) { el.innerHTML = `<p class="trend-empty">No weigh-ins in this range yet.</p>`; return; }
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const cs = getComputedStyle(el);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const width = Math.max(280, el.clientWidth - padX), height = 220, m = { top: 16, right: 12, bottom: 28, left: 40 };
+  const parse = d3.timeParse('%Y-%m-%d');
+  const raw = points.map((p) => ({ date: parse(p.date), value: p.value }));
+  const tr = trend.map((p) => ({ date: parse(p.date), value: p.value }));
+  const x = d3.scaleTime().range([m.left, width - m.right]);
+  if (raw.length === 1) x.domain([d3.timeDay.offset(raw[0].date, -3), d3.timeDay.offset(raw[0].date, 3)]);
+  else x.domain(d3.extent(raw, (d) => d.date));
+  const y = d3.scaleLinear().domain(trendDomain(raw.map((d) => d.value).concat(tr.map((d) => d.value)))).nice().range([height - m.bottom, m.top]);
+  const svg = d3.select(el).append('svg').attr('viewBox', `0 0 ${width} ${height}`).attr('class', 'trend')
+    .attr('role', 'img').attr('aria-label', 'Weight trend chart').style('touch-action', 'pan-y');
+  svg.append('g').attr('class', 'axis axis-y').attr('transform', `translate(${m.left},0)`)
+    .call(d3.axisLeft(y).ticks(4).tickSize(-(width - m.left - m.right)))
+    .call((g) => g.select('.domain').remove());
+  svg.append('g').attr('class', 'axis axis-x').attr('transform', `translate(0,${height - m.bottom})`)
+    .call(d3.axisBottom(x).ticks(Math.max(2, Math.floor(width / 90))).tickSizeOuter(0));
+  svg.append('g').selectAll('circle').data(raw).join('circle').attr('class', 'trend-dot').attr('r', 3.5)
+    .attr('cx', (d) => x(d.date)).attr('cy', (d) => y(d.value));
+  const line = svg.append('path').attr('class', 'trend-line')
+    .attr('d', d3.line().x((d) => x(d.date)).y((d) => y(d.value)).curve(d3.curveMonotoneX)(tr));
+  if (!reduce && tr.length > 1) {
+    const len = line.node().getTotalLength();
+    line.attr('stroke-dasharray', `${len} ${len}`).attr('stroke-dashoffset', len)
+      .transition().duration(900).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0)
+      .on('end', () => line.attr('stroke-dasharray', null));
+  }
+  const focus = svg.append('g').style('opacity', 0).style('pointer-events', 'none');
+  focus.append('line').attr('y1', m.top).attr('y2', height - m.bottom).style('stroke', 'var(--grid-strong)');
+  const focusDot = focus.append('circle').attr('r', 6).style('fill', 'var(--c-body)').style('stroke', 'var(--grouped)').attr('stroke-width', 2);
+  const tip = d3.select(el).append('div').attr('class', 'chart-tip').style('opacity', 0);
+  const bisect = d3.bisector((d) => d.date).center;
+  const fmt = d3.timeFormat('%a %-d %b');
+  svg.on('pointermove pointerdown', (event) => {
+    const [px] = d3.pointer(event);
+    const i = bisect(raw, x.invert(px));
+    const d = raw[i];
+    if (!d) return;
+    focus.style('opacity', 1).attr('transform', `translate(${x(d.date)},0)`);
+    focusDot.attr('cy', y(tr[i].value));
+    tip.style('opacity', 1).text(`${fmt(d.date)} · ${d.value} kg · trend ${Math.round(tr[i].value * 10) / 10} kg`);
+  }).on('pointerleave', () => { focus.style('opacity', 0); tip.style('opacity', 0); });
 }

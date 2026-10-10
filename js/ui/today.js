@@ -8,13 +8,18 @@
 import * as store from '../store.js';
 import { FLEX_KCAL, FLEX_PER_WEEK, dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
 import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
-import { esc, formatDateLong, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
+import { esc, formatDateLong, formatDateShort, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
 import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
+import { trendStatus, weekCheck, isDietBreakActive, dietBreakState } from '../trend.js';
+import { revertChange } from '../coach.js';
+import { FEEL_TAGS, cleanFeel } from '../health.js';
+import { openReviewEntry } from './reviewSheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
-import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey } from '../mealPlan.js';
+import { mealTimeLabel, sortMealsByAt, mergeAddToExisting, replaceKeepingLogged } from '../planLogic.js';
+import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey, pushPlanHistory, VARIETY_VALUES } from '../mealPlan.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -323,7 +328,7 @@ function mealRowHtml(step, meal, fieldCtx) {
     <img class="thumb thumb-meal" data-photo-id="${esc(meal.photoId)}" alt="" />
     <div class="row-label">
       <div>${esc(meal.dish || 'Meal')}</div>
-      <div class="item-sub">${esc(macroDotLine(meal.macros))}</div>
+      <div class="item-sub">${esc([mealTimeLabel(meal.at), macroDotLine(meal.macros)].filter(Boolean).join(' · '))}</div>
     </div>
     <span>${esc(meal.calories)} kcal</span>
     <button type="button" data-role="meal-delete" data-step-id="${esc(step.id)}" data-meal-id="${esc(meal.id)}" aria-label="Remove meal">×</button>
@@ -440,11 +445,48 @@ function flexFooterHtml(step, fieldCtx) {
   return `<p class="section-footer">Flex days this week: ${used} of ${FLEX_PER_WEEK} used (up to +${FLEX_KCAL} kcal over target)</p>`;
 }
 
+// "How did your gut / energy feel?" chips under the meal list (editable days
+// only — foodRowsHtml is never reached for a read-only day). Saved on the
+// food entry as `feel`; tapping toggles aria-pressed straight away and saves
+// via store.updateStep (see handleFeelToggle).
+function feelRowHtml(step, entry, meals, fieldCtx) {
+  if (!meals.length) return '';
+  const on = new Set(cleanFeel(entry.feel));
+  const chips = FEEL_TAGS.map(([value, label]) => `<button type="button" class="feel-chip" data-role="feel-chip" data-step-id="${esc(step.id)}" data-feel="${esc(value)}" aria-pressed="${on.has(value)}">${esc(label)}</button>`).join('');
+  return `<div class="row feel-row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <div class="row-label">
+      <div class="item-sub" id="feel-label-${esc(step.id)}">How did your gut / energy feel?</div>
+      <div class="feel-chips" role="group" aria-labelledby="feel-label-${esc(step.id)}">${chips}</div>
+    </div>
+  </div>`;
+}
+
+async function handleFeelToggle(btn) {
+  const ctx = fieldContext(btn);
+  if (!ctx) return;
+  const stepId = btn.dataset.stepId;
+  const tag = btn.dataset.feel;
+  const entry = (store.getDay(ctx.challengeId, ctx.date).steps || {})[stepId] || {};
+  const on = new Set(cleanFeel(entry.feel));
+  if (on.has(tag)) on.delete(tag); else on.add(tag);
+  btn.setAttribute('aria-pressed', String(on.has(tag)));
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  try {
+    await store.updateStep(ctx.challengeId, ctx.date, stepId, { feel: [...on] });
+    photoErrorByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    console.error('Save failed:', err);
+    photoErrorByKey.set(key, "Couldn't save. Please try again.");
+    rerenderIfCurrent(ctx);
+  }
+}
+
 function foodRowsHtml(step, entry, fieldCtx) {
   const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
   const meals = Array.isArray(entry.meals) ? entry.meals : [];
   const analyzing = savingByKey.has(key);
-  const mealsHtml = meals.map((m) => mealRowHtml(step, m, fieldCtx)).join('');
+  const mealsHtml = sortMealsByAt(meals).map((m) => mealRowHtml(step, m, fieldCtx)).join('');
   const totalHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <span class="row-label">Total · <span data-count="${esc(fieldCtx.challengeId)}:${esc(fieldCtx.date)}:${esc(step.id)}:kcal">${esc(mealsTotal(meals))}</span> kcal</span>
   </div>`;
@@ -464,7 +506,8 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const errorMessage = photoErrorByKey.get(key);
   const errorHtml = errorMessage ? `<div class="section-footer photo-error">${esc(errorMessage)}</div>` : '';
   const planHtml = mealPlanSectionHtml(step, fieldCtx);
-  return `${mealsHtml}${totalHtml}${macroLinesHtml}${plannedHtml}${addHtml}${planMealBtnHtml}${errorHtml}${planHtml}`;
+  const feelHtml = feelRowHtml(step, entry, meals, fieldCtx);
+  return `${mealsHtml}${totalHtml}${feelHtml}${macroLinesHtml}${plannedHtml}${addHtml}${planMealBtnHtml}${errorHtml}${planHtml}`;
 }
 
 // Water: +0.25 L / +0.5 L quick-add buttons on top of the ordinary number
@@ -1104,8 +1147,8 @@ async function handlePlannedDelete(btn) {
   }
 }
 
-function planMealSheetBodyHtml(state, slots, isEdit) {
-  const dateRow = isEdit ? '' : `<div class="row">
+function planMealSheetBodyHtml(state, slots, isEdit, fixedDate) {
+  const dateRow = (isEdit || fixedDate) ? '' : `<div class="row">
     <span class="field-label">Day</span>
     <div class="segmented">
       <label><input type="radio" name="plan-meal-date" value="today" data-role="plan-meal-date" ${state.dateChoice === 'today' ? 'checked' : ''}><span>Today</span></label>
@@ -1144,7 +1187,7 @@ function planMealSheetBodyHtml(state, slots, isEdit) {
 // (its date is fixed — only slot/dish/kcal are editable once created).
 // Saves through store.updatePlanned, same as the AI sheet's "Add to
 // tomorrow's plan"/"Add all" below.
-function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }) {
+export function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing, fixedDate = null, source = 'manual' }) {
   const isEdit = !!existing;
   const slots = (schedule && Array.isArray(schedule.slots)) ? schedule.slots : [];
   const initialSlotIndex = isEdit ? Math.max(0, slots.findIndex((s) => s.name === existing.slot)) : 0;
@@ -1158,7 +1201,7 @@ function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }
   };
 
   let sheetEl = null;
-  const render = () => `<div id="plan-meal-root">${planMealSheetBodyHtml(state, slots, isEdit)}</div>`;
+  const render = () => `<div id="plan-meal-root">${planMealSheetBodyHtml(state, slots, isEdit, fixedDate)}</div>`;
 
   const close = openSheet({
     title: isEdit ? 'Edit planned meal' : 'Plan a meal',
@@ -1172,6 +1215,7 @@ function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }
   }
 
   function targetDate() {
+    if (fixedDate) return fixedDate;
     return isEdit ? date : (state.dateChoice === 'tomorrow' ? addDays(date, 1) : date);
   }
 
@@ -1200,11 +1244,15 @@ function openPlanMealSheet({ challengeId, date, foodStepId, schedule, existing }
       const list = Array.isArray(entry.planned) ? entry.planned.slice() : [];
       if (isEdit) {
         const idx = list.findIndex((p) => p.id === existing.id);
-        if (idx !== -1) list[idx] = { ...existing, slot: slot.name, time: slot.time, dish, kcal: Math.round(kcalNum) };
+        if (idx !== -1) {
+          // Keep a custom time when the slot itself didn't change.
+          const sameSlot = slot.name === existing.slot;
+          list[idx] = { ...existing, slot: slot.name, time: sameSlot && existing.time ? existing.time : slot.time, dish, kcal: Math.round(kcalNum) };
+        }
       } else {
         list.push({
           id: makePlannedId(), slot: slot.name, time: slot.time, dish, kcal: Math.round(kcalNum),
-          macros: { protein: 0, carbs: 0, fat: 0, fiber: 0 }, source: 'manual',
+          macros: { protein: 0, carbs: 0, fat: 0, fiber: 0 }, source,
         });
       }
       await store.updatePlanned(challengeId, targetD, foodStepId, list);
@@ -1273,7 +1321,7 @@ export async function refreshBodyCheckIfDue(challenge, { force = false } = {}) {
 
 function planFromChallenge(challenge) {
   const plan = challenge.mealPlan;
-  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes || [], have: plan.have || [], pref: plan.pref || null, forDate: plan.forDate } : null;
+  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes || [], have: plan.have || [], pref: plan.pref || null, forDate: plan.forDate, coach: plan.coach || null } : null;
 }
 
 // "1480 / 1500 kcal · P 150 / 155 g …" (docs §1's totals-vs-targets line).
@@ -1302,19 +1350,22 @@ function bodyNoteFrom(bodyCheck) {
 // persisted, so reopening the sheet later always offers every meal again —
 // adding the same dish twice just leaves two placeholders, which the user
 // can delete like any other (see plannedRowHtml/handlePlannedDelete).
-function planMealRowHtml(meal, index, added) {
+function planMealRowHtml(meal, index, added, dayLabel) {
   const macroLine = macroInlineLine({ protein: meal.protein, carbs: meal.carbs, fat: meal.fat, fiber: meal.fiber });
   const swapHtml = meal.swapFor ? `<div class="item-sub">Swap: ${esc(meal.swapFor)}</div>` : '';
+  const newPill = meal.isNew ? ' <span class="pill pending" style="height:20px;padding:0 8px;font-size:11px;vertical-align:middle">New</span>' : '';
+  const noteHtml = meal.localNote ? `<div class="item-sub">${esc(meal.localNote)}</div>` : '';
   return `<div class="row">
     <div class="row-label">
-      <div>${esc(meal.slot)} · ${esc(meal.dish)}</div>
+      <div>${esc(meal.slot)} · ${esc(meal.dish)}${newPill}</div>
       <div class="item-sub">${esc(meal.portion)} · ${esc(macroLine)}</div>
+      ${noteHtml}
       ${swapHtml}
     </div>
     <span>${esc(meal.kcal)} kcal</span>
   </div>
   <div class="row">
-    <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-add-meal" data-index="${index}"${added ? ' disabled' : ''}>${added ? 'Added to tomorrow’s plan' : "Add to tomorrow's plan"}</button>
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-add-meal" data-index="${index}"${added ? ' disabled' : ''}>${added ? (dayLabel ? `Added to ${esc(dayLabel)}` : 'Added to tomorrow’s plan') : (dayLabel ? `Add to ${esc(dayLabel)}` : "Add to tomorrow's plan")}</button>
   </div>`;
 }
 
@@ -1335,6 +1386,33 @@ function prefPickerHtml(state) {
     `<label><input type="radio" name="meal-pref" value="${esc(o.value)}" data-role="meal-pref" ${state.pref === o.value ? 'checked' : ''}><span>${esc(o.label)}</span></label>`
   ).join('');
   return `<div class="section"><h2 class="section-header">Meal preference</h2><div class="segmented">${inputs}</div></div>`;
+}
+
+// Familiar · Balanced · Explore (R3), remembered in tracker:suggestVariety.
+const VARIETY_LABELS = { familiar: 'Familiar', balanced: 'Balanced', explore: 'Explore' };
+const VARIETY_KEY = 'tracker:suggestVariety';
+function loadVariety() {
+  try {
+    const v = localStorage.getItem(VARIETY_KEY);
+    return VARIETY_VALUES.includes(v) ? v : 'balanced';
+  } catch (_) { return 'balanced'; }
+}
+function saveVariety(v) {
+  try { localStorage.setItem(VARIETY_KEY, v); } catch (_) { /* storage blocked */ }
+}
+function varietyPickerHtml(state) {
+  const inputs = VARIETY_VALUES.map((v) =>
+    `<label><input type="radio" name="meal-variety" value="${v}" data-role="meal-variety" ${state.variety === v ? 'checked' : ''}><span>${VARIETY_LABELS[v]}</span></label>`
+  ).join('');
+  return `<div class="section"><h2 class="section-header">Variety</h2><div class="segmented">${inputs}</div>
+    <p class="section-footer">Familiar sticks to what you eat. Explore brings new local dishes.</p></div>`;
+}
+
+// "Built to fix: …" note shown when the plan used a fresh plateau review.
+function coachNoteHtml(coach) {
+  if (!coach || !Array.isArray(coach.mistakes) || !coach.mistakes.length) return '';
+  const when = /^\d{4}-\d{2}-\d{2}$/.test(coach.reviewDate || '') ? ` (from your ${formatDateShort(coach.reviewDate).replace(/^[^,]+, /, '')} review)` : '';
+  return `<p class="section-footer">Built to fix: ${esc(coach.mistakes.join(', '))}${esc(when)}</p>`;
 }
 
 // "Grocery list for <tomorrow>": rows grouped by category with a "have it"
@@ -1359,9 +1437,30 @@ function groceryHtml(state) {
   ${state.shareMsg ? `<p class="section-footer">${esc(state.shareMsg)}</p>` : ''}`;
 }
 
+// "Add all" button; from the Plan tab (state.askMode) it first asks whether to
+// add to the day's existing plan or replace it (replace confirms inline).
+function addAllAskHtml(state, addAllDisabled, allAdded) {
+  const label = state.dayLabel ? esc(state.dayLabel) : 'tomorrow’s plan';
+  if (state.addAllStage === 'ask') {
+    return `<div class="section-footer">Add these meals to ${label}:</div>
+    <button type="button" class="btn btn-primary" data-role="plan-add-existing">Add to existing</button>
+    <button type="button" class="btn btn-secondary" data-role="plan-replace-ask">Replace this day’s plan</button>
+    <button type="button" class="btn btn-secondary" data-role="plan-add-cancel">Cancel</button>`;
+  }
+  if (state.addAllStage === 'confirm') {
+    return `<div class="section-footer">Replace ${label}? Meals you already logged are kept.</div>
+    <div class="btn-pair">
+      <button type="button" class="btn btn-secondary" data-role="plan-add-cancel">No</button>
+      <button type="button" class="btn btn-primary" data-role="plan-replace-yes">Yes, replace</button>
+    </div>`;
+  }
+  return `<button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : (state.dayLabel ? `Add all to ${label}` : 'Add all to tomorrow’s plan')}</button>`;
+}
+
 function mealPlanBodyHtml(state) {
   if (state.stage === 'pick' && !state.loading) {
     return `${prefPickerHtml(state)}
+      ${varietyPickerHtml(state)}
       <button type="button" class="btn btn-primary" data-role="meal-plan-go">Suggest</button>
       <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Cancel</button>`;
   }
@@ -1372,21 +1471,21 @@ function mealPlanBodyHtml(state) {
     return `<div class="section-footer error">${esc(state.error)}</div>
       <button type="button" class="btn btn-primary" data-role="meal-plan-close">Close</button>`;
   }
-  const mealsHtml = state.meals.map((m, i) => planMealRowHtml(m, i, state.addedIndices.has(i))).join('');
+  const mealsHtml = state.meals.map((m, i) => planMealRowHtml(m, i, state.addedIndices.has(i), state.dayLabel)).join('');
   const targetsHtml = targetsLineHtml(state.targets, state.totals);
   const warningHtml = state.warning ? `<p class="section-footer error">${esc(state.warning)}</p>` : '';
   const bodyNote = bodyNoteFrom(state.bodyCheck);
   const allAdded = state.meals.length > 0 && state.meals.every((_, i) => state.addedIndices.has(i));
   const addAllDisabled = state.busy || allAdded || state.meals.length === 0;
   const addAllError = state.addError ? `<p class="section-footer error">${esc(state.addError)}</p>` : '';
-  return `<div class="group">${mealsHtml}</div>
+  return `${coachNoteHtml(state.coach)}<div class="group">${mealsHtml}</div>
     ${targetsHtml ? `<p class="section-footer">${esc(targetsHtml)}</p>` : ''}
     ${warningHtml}
     ${state.fixes && state.fixes.length ? linesHtml('Fixes from yesterday', state.fixes) : linesHtml('Why this plan', state.why)}
     ${bodyNote ? `<p class="section-footer">${esc(bodyNote)}</p>` : ''}
     ${linesHtml('Tips', state.tips)}
     ${groceryHtml(state)}
-    <button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : 'Add all to tomorrow’s plan'}</button>
+    ${addAllAskHtml(state, addAllDisabled, allAdded)}
     ${addAllError}
     <div class="btn-pair">
       <button type="button" class="btn btn-secondary" data-role="meal-plan-new"${state.busy ? ' disabled' : ''}>${state.busy ? loaderHtml('Thinking…') : 'New ideas'}</button>
@@ -1400,7 +1499,12 @@ function mealPlanBodyHtml(state) {
 // anything; otherwise (the "Today's plan" row) it shows the saved plan
 // straight away, still refreshed against the current targets/body-check text
 // (both pure, no network — see js/mealPlan.js).
-function openMealPlanSheet(ctx, opts = {}) {
+//
+// `opts.dateLabel` (e.g. "Mon 13 Oct") retargets the sheet at a day other
+// than tomorrow — the Plan tab passes it with `opts.forDate`; leaving it off
+// keeps the Today wording. `opts.askMode` makes "Add all" ask Add-to-existing
+// vs Replace (Today keeps its plain append).
+export function openMealPlanSheet(ctx, opts = {}) {
   const challenge = store.state.challenges.find((c) => c.id === ctx.challengeId);
   if (!challenge) return;
   const existing = planFromChallenge(challenge);
@@ -1422,6 +1526,8 @@ function openMealPlanSheet(ctx, opts = {}) {
     stage: opts.generate ? 'pick' : 'plan',
     diet: challenge.profile && challenge.profile.diet,
     pref: startPref,
+    variety: loadVariety(),
+    coach: existing ? existing.coach : null,
     fixes: existing ? existing.fixes : [],
     have: existing ? existing.have : [],
     shareMsg: '',
@@ -1441,13 +1547,16 @@ function openMealPlanSheet(ctx, opts = {}) {
     // addMealToPlan/addAllMealsToPlan. Reset whenever state.meals changes.
     addedIndices: new Set(),
     addError: '',
+    dayLabel: opts.dateLabel || '',
+    askMode: !!opts.askMode,
+    addAllStage: null,
   };
 
   let sheetEl = null;
   const render = () => `<div id="meal-plan-root">${mealPlanBodyHtml(state)}</div>`;
 
   const close = openSheet({
-    title: "Tomorrow's meal plan",
+    title: state.dayLabel ? `Meal plan · ${state.dayLabel}` : "Tomorrow's meal plan",
     bodyHtml: render(),
     onMount: (el) => { sheetEl = el; wire(el); },
   });
@@ -1470,11 +1579,15 @@ function openMealPlanSheet(ctx, opts = {}) {
       await refreshBodyCheckIfDue(challenge).catch((err) => console.error('Body check failed:', err));
       const freshChallenge = store.state.challenges.find((c) => c.id === ctx.challengeId) || challenge;
       const freshDaysMap = store.state.days[ctx.challengeId] || {};
-      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date, state.pref);
-      const result = await suggestMeals(freshInput, avoidDishes);
+      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date, state.pref, state.variety);
+      const result = await suggestMeals(freshInput, avoidDishes, state.dayLabel ? `${state.dayLabel} (${state.forDate})` : undefined);
+      const usedCoach = freshInput.coach && freshInput.coach.whats.length
+        ? { mistakes: freshInput.coach.whats, reviewDate: freshInput.coach.reviewDate } : null;
       await store.patchChallenge(ctx.challengeId, {
-        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips, fixes: result.fixes, pref: state.pref, have: [] },
+        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips, fixes: result.fixes, pref: state.pref, have: [], ...(usedCoach ? { coach: usedCoach } : {}) },
+        mealPlanHistory: pushPlanHistory(freshChallenge.mealPlanHistory, state.forDate, result.meals.map((m) => m.dish)),
       });
+      state.coach = usedCoach;
       state.meals = result.meals;
       state.why = result.why;
       state.tips = result.tips;
@@ -1525,12 +1638,16 @@ function openMealPlanSheet(ctx, opts = {}) {
   // Appends placeholders to tomorrow's (state.forDate's) food-step `planned`
   // list via store.updatePlanned — same store call the manual "Plan a meal"
   // sheet uses (js/store.js's updatePlanned works for today or tomorrow).
-  async function addPlaceholders(newPlaceholders) {
+  async function addPlaceholders(newPlaceholders, mode = 'append') {
     const foodStep = (challenge.steps || []).find((s) => s.type === 'food');
     if (!foodStep) throw new Error("This challenge has no Food step to plan.");
     const day = store.getDay(ctx.challengeId, state.forDate);
     const entry = (day.steps && day.steps[foodStep.id]) || {};
-    const list = (Array.isArray(entry.planned) ? entry.planned : []).concat(newPlaceholders);
+    const current = Array.isArray(entry.planned) ? entry.planned : [];
+    let list;
+    if (mode === 'replace') list = replaceKeepingLogged(current, entry.meals, newPlaceholders);
+    else if (mode === 'merge') list = mergeAddToExisting(current, newPlaceholders).list;
+    else list = current.concat(newPlaceholders);
     await store.updatePlanned(ctx.challengeId, state.forDate, foodStep.id, list);
   }
 
@@ -1540,7 +1657,7 @@ function openMealPlanSheet(ctx, opts = {}) {
     if (!meal) return;
     state.addError = '';
     try {
-      await addPlaceholders([aiMealToPlaceholder(meal)]);
+      await addPlaceholders([aiMealToPlaceholder(meal)], state.askMode ? 'merge' : 'append');
       state.addedIndices.add(index);
       markSaved(ctx);
       rerenderSheet();
@@ -1551,12 +1668,16 @@ function openMealPlanSheet(ctx, opts = {}) {
     }
   }
 
-  async function addAllMealsToPlan() {
-    const toAdd = state.meals.map((m, i) => i).filter((i) => !state.addedIndices.has(i));
-    if (!toAdd.length) return;
+  async function addAllMealsToPlan(mode = 'append') {
+    // Replace re-adds every suggested meal, even ones added one-by-one before.
+    const toAdd = mode === 'replace'
+      ? state.meals.map((m, i) => i)
+      : state.meals.map((m, i) => i).filter((i) => !state.addedIndices.has(i));
+    state.addAllStage = null;
+    if (!toAdd.length) { rerenderSheet(); return; }
     state.addError = '';
     try {
-      await addPlaceholders(toAdd.map((i) => aiMealToPlaceholder(state.meals[i])));
+      await addPlaceholders(toAdd.map((i) => aiMealToPlaceholder(state.meals[i])), mode);
       for (const i of toAdd) state.addedIndices.add(i);
       markSaved(ctx);
       rerenderSheet();
@@ -1620,6 +1741,12 @@ function openMealPlanSheet(ctx, opts = {}) {
         state.pref = prefInput.value;
         return;
       }
+      const varietyInput = e.target.closest('[data-role="meal-variety"]');
+      if (varietyInput) {
+        state.variety = varietyInput.value;
+        saveVariety(state.variety);
+        return;
+      }
       const haveInput = e.target.closest('[data-role="grocery-have"]');
       if (haveInput) {
         const key = haveInput.dataset.key;
@@ -1656,8 +1783,14 @@ function openMealPlanSheet(ctx, opts = {}) {
         return;
       }
       if (e.target.closest('[data-role="plan-add-all"]')) {
+        if (state.askMode) { state.addAllStage = 'ask'; rerenderSheet(); return; }
         addAllMealsToPlan();
+        return;
       }
+      if (e.target.closest('[data-role="plan-add-existing"]')) { addAllMealsToPlan('merge'); return; }
+      if (e.target.closest('[data-role="plan-replace-ask"]')) { state.addAllStage = 'confirm'; rerenderSheet(); return; }
+      if (e.target.closest('[data-role="plan-replace-yes"]')) { addAllMealsToPlan('replace'); return; }
+      if (e.target.closest('[data-role="plan-add-cancel"]')) { state.addAllStage = null; rerenderSheet(); }
     });
   }
 }
@@ -1924,6 +2057,33 @@ function wireDelegation(root) {
       navigateBackOrDone(true);
       return;
     }
+    if (e.target.closest('[data-role="coach-why"]')) {
+      const c = store.selected();
+      if (c) openReviewEntry(c);
+      return;
+    }
+    const feelBtn = e.target.closest('[data-role="feel-chip"]');
+    if (feelBtn) {
+      handleFeelToggle(feelBtn);
+      return;
+    }
+    const backBtnDb = e.target.closest('[data-role="diet-break-back"]');
+    if (backBtnDb) {
+      const c = store.selected();
+      if (c) {
+        backBtnDb.disabled = true;
+        store.updateChallenge(revertChange(c)).catch((err) => {
+          backBtnDb.disabled = false;
+          alert("Couldn't restore your target: " + err.message);
+        });
+      }
+      return;
+    }
+    if (e.target.closest('[data-role="coach-later"]')) {
+      try { localStorage.setItem(COACH_DISMISS_KEY, addDays(store.today(), COACH_DISMISS_DAYS)); } catch (_) { /* storage blocked */ }
+      if (current) current.rerender();
+      return;
+    }
     const summaryBtn = e.target.closest('[data-role="view-summary"]');
     if (summaryBtn) {
       location.hash = `#/summary/${summaryBtn.dataset.date}`;
@@ -2132,6 +2292,69 @@ function wireDelegation(root) {
 
 // ---------- main render ----------
 
+// ---------- plateau coach card (R1) ----------
+
+const COACH_DISMISS_KEY = 'tracker:coachDismissedUntil';
+const COACH_MIN_ADHERENCE = 70;
+const COACH_DISMISS_DAYS = 7;
+
+function coachDismissedUntil() {
+  try { return localStorage.getItem(COACH_DISMISS_KEY) || ''; } catch (_) { return ''; }
+}
+
+// Diet-break banner (R2): replaces the coach card from the day the break is
+// applied until the user taps "Back to X kcal".
+function dietBreakBannerHtml(challenge, todayStr) {
+  const st = dietBreakState(challenge, todayStr);
+  if (!st) return '';
+  const n = (v) => Number(v).toLocaleString('en-US');
+  if (st.phase === 'running') {
+    return `<div class="coach-card" role="region" aria-label="Diet break">
+      <p>Diet break: <strong>day ${esc(st.day)} of ${esc(st.of)}</strong> — eating at maintenance (${esc(n(st.kcal))} kcal)</p>
+    </div>`;
+  }
+  return `<div class="coach-card" role="region" aria-label="Diet break">
+    <p>Diet break done.</p>
+    <button type="button" class="btn btn-primary" data-role="diet-break-back">Back to ${esc(n(st.backTo))} kcal</button>
+  </div>`;
+}
+
+// Card above the steps on Today for fitness challenges with a body step:
+// plateau/fluctuating/gaining with >= 70 % adherence, or a stalled week.
+function coachCardHtml(challenge, attempt, todayStr) {
+  if (challenge.category !== 'fitness' || !attempt) return '';
+  if (!challenge.steps.some((st) => st.type === 'body')) return '';
+  if (isDietBreakActive(challenge, todayStr) || dietBreakState(challenge, todayStr)) return '';
+  if (todayStr < coachDismissedUntil()) return '';
+  const daysMap = store.state.days[challenge.id] || {};
+  const opts = { startDate: attempt.startDate };
+  const t = trendStatus(challenge, daysMap, todayStr, { ...opts, windowDays: 14 });
+  const adherence = t.adherencePct ?? 0;
+  const trendHit = ['plateau', 'fluctuating', 'gaining'].includes(t.status) && adherence >= COACH_MIN_ADHERENCE;
+  const wk = trendHit ? null : weekCheck(challenge, daysMap, todayStr, opts);
+  if (!trendHit && !(wk && wk.stalled)) return '';
+
+  const kg = (n) => Math.round(Math.abs(n) * 10) / 10;
+  let text;
+  if (!trendHit) {
+    text = `Weight hasn't dropped this week although you hit <strong>${esc(wk.greenDays)} of 7</strong> days. Let's find out why.`;
+  } else if (t.status === 'gaining') {
+    text = `Weight up <strong>${esc(kg(t.changeKg))} kg</strong> while you hit <strong>${esc(adherence)} %</strong> of days. Let's find out why.`;
+  } else {
+    const flatDays = Math.max(1, diffDays(t.stalledSince || addDays(todayStr, -13), todayStr) + 1);
+    text = t.status === 'fluctuating'
+      ? `Weight bouncing <strong>±${esc(kg(t.rangeKg / 2))} kg</strong> for <strong>${esc(flatDays)} days</strong> while you hit <strong>${esc(adherence)} %</strong> of days. Let's find out why.`
+      : `Weight flat for <strong>${esc(flatDays)} days</strong> while you hit <strong>${esc(adherence)} %</strong> of days. Let's find out why.`;
+  }
+  return `<div class="coach-card" role="region" aria-label="Weight coach">
+    <p>${text}</p>
+    <div class="btn-pair">
+      <button type="button" class="btn btn-primary" data-role="coach-why">Find out why</button>
+      <button type="button" class="btn btn-secondary" data-role="coach-later">Later</button>
+    </div>
+  </div>`;
+}
+
 async function renderScreen(root, { date, dayRoute }) {
   // Belt-and-braces alongside the hashchange reset: any render at all means
   // the app is live and responsive again, so a `navigating` guard left over
@@ -2193,6 +2416,9 @@ async function renderScreen(root, { date, dayRoute }) {
   </div>`;
 
   const eatingWindowHtml = eatingWindowLineHtml(challenge, date, todayStr);
+  const coachHtml = !dayRoute && date === todayStr
+    ? (dietBreakBannerHtml(challenge, todayStr) || coachCardHtml(challenge, attempt, todayStr))
+    : '';
 
   const flexOn = store.flexDatesFor(challenge.id).has(date);
   const stepsHtml = challenge.steps.map((step) => {
@@ -2230,6 +2456,7 @@ async function renderScreen(root, { date, dayRoute }) {
   root.innerHTML = `${headerHtml}
     ${heroHtml}
     ${eatingWindowHtml}
+    ${coachHtml}
     ${summaryBtnHtml}
     <div class="section">
       <h2 class="section-header">${sectionTitle}</h2>

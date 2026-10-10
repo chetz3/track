@@ -16,6 +16,7 @@ import { renderCalendar, renderOverview } from './ui/calendar.js';
 import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/challenges.js';
 import { renderSummary } from './ui/summary.js';
 import { renderStats } from './ui/stats.js';
+import { renderPlanner } from './ui/planner.js';
 import { getGeminiKey } from './gemini.js';
 import { openAiKeySheet } from './ui/aiKeySheet.js';
 import { startReminders } from './reminderRunner.js';
@@ -39,6 +40,7 @@ function placeholder(title) {
 // individual entries for the real screen module's render function.
 const ROUTES = {
   today: renderToday,
+  plan: renderPlanner,
   day: (root, params) => renderDay(root, params.date),
   calendar: (root, params) => renderCalendar(root, params.month),
   overview: renderOverview,
@@ -64,6 +66,8 @@ function matchRoute() {
     case undefined:
     case 'today':
       return { top: 'today', key: 'today', params: {} };
+    case 'plan':
+      return { top: 'plan', key: 'plan', params: {} };
     case 'day':
       return { top: 'day', key: 'day', params: { date: second || store.today() } };
     case 'calendar':
@@ -85,6 +89,7 @@ function matchRoute() {
 
 function tabForTop(top) {
   if (top === 'today') return 'today';
+  if (top === 'plan') return 'plan';
   if (top === 'stats') return 'stats';
   if (top === 'challenges') return 'challenges';
   return 'calendar'; // day, calendar, summary
@@ -242,8 +247,21 @@ onAuthChange(() => scheduleRender());
 // another tab, private-mode quota, a corrupt DB) or store.loadAll() choked on
 // bad data. Without this the app was a permanently blank white screen with no
 // way out but to already know to hard-reload.
+// Dev host only (localhost / LAN): report errors to the dev server's request
+// log as a GET beacon, so phone-only failures can be read on the Mac.
+function devReport(kind, err) {
+  try {
+    if (!/^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(location.hostname)) return;
+    const msg = `${kind}: ${err && err.message} @ ${(err && err.stack || '').split('\n').slice(0, 4).join(' <- ')} | ${navigator.userAgent}`;
+    new Image().src = `./__err?${encodeURIComponent(msg.slice(0, 1500))}`;
+  } catch (_) { /* never let reporting break anything */ }
+}
+window.addEventListener('error', (e) => devReport('error', e.error || { message: e.message, stack: `${e.filename}:${e.lineno}` }));
+window.addEventListener('unhandledrejection', (e) => devReport('rejection', e.reason));
+
 function renderBootError(err) {
   console.error('Boot failed:', err);
+  devReport('boot', err);
   tabbarEl.hidden = true;
   appEl.innerHTML = `
     <h1 class="large-title">Couldn't open your data</h1>

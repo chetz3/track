@@ -9,7 +9,7 @@
 import * as store from '../store.js';
 import { dayStatus, isEditable, addDays } from '../rules.js';
 import { esc, formatDateShort, hydratePhotos } from './dom.js';
-import { buildDaySummary, buildDayDetails } from '../summaryModel.js';
+import { buildDaySummary, buildDayDetails, groupPhotosByStep } from '../summaryModel.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -25,7 +25,7 @@ const STATUS_LABELS = { green: 'Complete', red: 'Missed', pending: 'In progress'
 // when the summary route was the very first thing this tab loaded (a
 // deep link/bookmark straight onto #/summary/:date), where back() could
 // leave the app entirely.
-const KNOWN_TOPS = ['', 'today', 'day', 'calendar', 'overview', 'stats', 'challenges', 'summary'];
+const KNOWN_TOPS = ['', 'today', 'plan', 'day', 'calendar', 'overview', 'stats', 'challenges', 'summary'];
 function isInAppHash(hash) {
   const top = hash.replace(/^#\/?/, '').split('/')[0];
   return KNOWN_TOPS.includes(top);
@@ -105,10 +105,10 @@ function photosHtml(photos, nav = { prev: null, next: null }) {
 
 // The nearest earlier / later day (not after today) that has at least one
 // photo, so the picture's ‹ › can roll on past this day's last photo.
-function neighbourDates(challenge, date, todayStr) {
+function neighbourDates(challenge, date, todayStr, stepId) {
   const daysMap = store.state.days[challenge.id] || {};
   const withPhotos = Object.keys(daysMap)
-    .filter((d) => d <= todayStr && d !== date && buildDaySummary(challenge, daysMap[d]).photos.length > 0)
+    .filter((d) => d <= todayStr && d !== date && buildDaySummary(challenge, daysMap[d]).photos.some((p) => p.stepId === stepId))
     .sort();
   const prev = withPhotos.filter((d) => d < date).pop() || null;
   const next = withPhotos.find((d) => d > date) || null;
@@ -127,6 +127,29 @@ function stepPicture(root, photos, dir, nav) {
   const date = dir > 0 ? nav.next : nav.prev;
   if (date) location.replace(`#/summary/${date}`);
   else if (photos.length > 1) goToSlide(root, photos, dir); // wrap within the day
+}
+
+// ---------- photo tabs ----------
+
+// Remembered tab (step kind + id), so it survives re-renders and day changes.
+let selectedTab = null;
+
+function resolveTab(groups) {
+  if (!groups.length) return null;
+  if (selectedTab) {
+    const hit = groups.find((g) => g.stepId === selectedTab.stepId)
+      || (selectedTab.kind !== 'custom' ? groups.find((g) => g.kind === selectedTab.kind) : null);
+    if (hit) return hit;
+  }
+  return groups.find((g) => g.kind === 'body') || groups[0];
+}
+
+function tabsHtml(groups, active) {
+  if (!groups.length) return '';
+  return `<div class="summary-tabs" role="tablist" aria-label="Photo categories">${groups.map((g) => {
+    const on = g === active;
+    return `<button type="button" class="summary-tab${on ? ' active' : ''}" role="tab" aria-selected="${on}" data-role="photo-tab" data-step-id="${esc(g.stepId)}">${esc(g.name)} <span class="summary-tab-count">${g.photos.length}</span></button>`;
+  }).join('')}</div>`;
 }
 
 // ---------- details overlay ----------
@@ -155,9 +178,9 @@ function photoInfoText(photos, idx) {
   return `Photo ${idx + 1} / ${photos.length} · ${p.caption || p.stepName}`;
 }
 
-function rowHtml(row, photoIndex) {
+function rowHtml(row, hasPhoto) {
   const thumb = row.photoId ? `<img class="summary-row-thumb" data-photo-id="${esc(row.photoId)}" alt="" />` : '';
-  const goto = row.photoId && photoIndex >= 0 ? ` data-role="goto-photo" data-photo-index="${photoIndex}"` : '';
+  const goto = row.photoId && hasPhoto ? ` data-role="goto-photo" data-photo-ref="${esc(row.photoId)}"` : '';
   return `<div class="summary-row${goto ? ' tappable' : ''}"${goto}>
     ${thumb}
     <div class="summary-row-text">
@@ -170,7 +193,7 @@ function rowHtml(row, photoIndex) {
 function stepCardHtml(detail, type, photos) {
   const open = isStepOpen(detail, type);
   const checkCls = detail.complete ? 'summary-check done' : 'summary-check';
-  const rowsHtml = detail.rows.map((r) => rowHtml(r, r.photoId ? photos.findIndex((p) => p.photoId === r.photoId) : -1)).join('');
+  const rowsHtml = detail.rows.map((r) => rowHtml(r, !!r.photoId && photos.some((p) => p.photoId === r.photoId))).join('');
   const noteHtml = detail.note ? `<div class="summary-step-note">${esc(detail.note)}</div>` : '';
   const bodyHtml = rowsHtml + noteHtml || '<div class="summary-row-sub">Nothing logged</div>';
   return `<div class="summary-step${detail.mandatory ? ' mandatory' : ''}${open ? ' open' : ''}">
@@ -184,13 +207,13 @@ function stepCardHtml(detail, type, photos) {
   </div>`;
 }
 
-function detailsHtml(date, status, details, challenge, photos) {
+function detailsHtml(date, status, details, challenge, photos, shown) {
   const typeOf = (id) => (challenge.steps.find((s) => s.id === id) || {}).type;
   return `<div class="summary-details" data-role="details">
     <div class="summary-details-head">
       <div class="summary-panel-date">${esc(formatDateShort(date))}</div>
       <span class="pill ${status}">${esc(STATUS_LABELS[status] || status)}</span>
-      <div class="summary-photo-info" data-role="photo-info">${esc(photoInfoText(photos, 0))}</div>
+      <div class="summary-photo-info" data-role="photo-info">${esc(photoInfoText(shown, 0))}</div>
     </div>
     ${details.map((d) => stepCardHtml(d, typeOf(d.stepId), photos)).join('')}
   </div>`;
@@ -251,7 +274,7 @@ function goToSlide(root, photos, dir) {
   strip.scrollTo({ left: next * strip.clientWidth, behavior: 'smooth' });
 }
 
-function wireControls(root, date, photos, nav = { prev: null, next: null }) {
+function wireControls(root, date, photos, nav = { prev: null, next: null }, allPhotos = photos, selectTab = null) {
   if (root.__summaryWired) return;
   root.__summaryWired = true;
   root.addEventListener('click', (e) => {
@@ -283,11 +306,23 @@ function wireControls(root, date, photos, nav = { prev: null, next: null }) {
       stepOpenState.set(toggleStep.dataset.stepId, open);
       return;
     }
+    const tab = e.target.closest('[data-role="photo-tab"]');
+    if (tab) {
+      if (selectTab) selectTab(tab.dataset.stepId);
+      return;
+    }
     const gotoPhoto = e.target.closest('[data-role="goto-photo"]');
     if (gotoPhoto) {
+      const target = allPhotos.find((p) => p.photoId === gotoPhoto.dataset.photoRef);
+      if (!target) return;
+      const inTab = photos.some((p) => p.photoId === target.photoId);
+      if (!inTab && selectTab) {
+        selectTab(target.stepId, target.photoId);
+        return;
+      }
       const strip = root.querySelector('[data-role="photos-strip"]');
-      const i = Number(gotoPhoto.dataset.photoIndex);
-      if (strip && Number.isFinite(i)) strip.scrollTo({ left: i * strip.clientWidth, behavior: 'smooth' });
+      const i = photos.findIndex((p) => p.photoId === target.photoId);
+      if (strip && i >= 0) strip.scrollTo({ left: i * strip.clientWidth, behavior: 'smooth' });
       return;
     }
     if (e.target.closest('.summary-details')) return;
@@ -310,7 +345,7 @@ function wireControls(root, date, photos, nav = { prev: null, next: null }) {
 
 // ---------- main render ----------
 
-export async function renderSummary(root, dateParam) {
+export async function renderSummary(root, dateParam, scrollToPhotoId = null) {
   const challenge = store.selected();
   if (!challenge) {
     // No selected challenge (e.g. transiently null mid-delete): still show
@@ -331,16 +366,35 @@ export async function renderSummary(root, dateParam) {
   const detailsShown = readDetailsShown();
   const showEdit = isEditable(date, todayStr);
 
-  const nav = neighbourDates(challenge, date, todayStr);
+  const groups = groupPhotosByStep(challenge, summary.photos);
+  const active = resolveTab(groups);
+  if (active) selectedTab = { kind: active.kind, stepId: active.stepId };
+  const photos = active ? active.photos : [];
+  const nav = active ? neighbourDates(challenge, date, todayStr, active.stepId) : { prev: null, next: null };
   root.innerHTML = `<div class="summary-viewer${detailsShown ? '' : ' details-off'}">
-    ${photosHtml(summary.photos, nav)}
+    ${photosHtml(photos, nav)}
     ${controlsHtml(showEdit, detailsShown)}
-    ${detailsHtml(date, status, details, challenge, summary.photos)}
+    ${tabsHtml(groups, active)}
+    ${detailsHtml(date, status, details, challenge, summary.photos, photos)}
   </div>`;
 
   const viewer = root.querySelector('.summary-viewer');
-  wireStrip(viewer, summary.photos);
-  wireControls(viewer, date, summary.photos, nav);
+  const selectTab = (stepId, photoId = null) => {
+    const g = groups.find((x) => x.stepId === stepId);
+    if (!g) return;
+    selectedTab = { kind: g.kind, stepId: g.stepId };
+    renderSummary(root, dateParam, photoId);
+  };
+  wireStrip(viewer, photos);
+  wireControls(viewer, date, photos, nav, summary.photos, selectTab);
   attachEscHandler();
   await hydratePhotos(root);
+  if (scrollToPhotoId) {
+    const strip = viewer.querySelector('[data-role="photos-strip"]');
+    const i = photos.findIndex((p) => p.photoId === scrollToPhotoId);
+    if (strip && i > 0) {
+      strip.scrollLeft = i * strip.clientWidth;
+      updateNavUi(viewer, photos, i);
+    }
+  }
 }

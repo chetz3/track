@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v44';
+const CACHE_NAME = 'tracker-shell-v50';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -21,6 +21,11 @@ const SHELL_FILES = [
   './js/gemini.js',
   './js/fitness.js',
   './js/mealPlan.js',
+  './js/planLogic.js',
+  './js/dish.js',
+  './js/trend.js',
+  './js/coach.js',
+  './js/health.js',
   './js/reminders.js',
   './js/reminderRunner.js',
   './js/ui/dom.js',
@@ -33,7 +38,9 @@ const SHELL_FILES = [
   './js/ui/challenges.js',
   './js/ui/stepEditor.js',
   './js/ui/aiKeySheet.js',
+  './js/ui/reviewSheet.js',
   './js/ui/stats.js',
+  './js/ui/planner.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -67,6 +74,18 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
+
+  // Dev hosts (localhost / LAN): network first, so files edited between
+  // version bumps are never mixed with older cached ones. Cache is only the
+  // offline fallback here. The live site keeps stale-while-revalidate below.
+  if (url.origin === self.location.origin && /^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(self.location.hostname)) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .catch(() => caches.match(event.request, { cacheName: CACHE_NAME }))
+        .then((res) => res || Response.error()),
+    );
+    return;
+  }
 
   if (url.origin === self.location.origin) {
     // `cache: 'no-cache'` makes the browser revalidate with the server

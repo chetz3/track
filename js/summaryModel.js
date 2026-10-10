@@ -5,6 +5,8 @@
 import { isStepComplete, isNumberValue, diffDays } from './rules.js';
 import { targetFor } from './fitness.js';
 import { macroInlineLine, mealsMacros } from './foodLogic.js';
+import { mealTimeLabel, sortMealsByAt } from './planLogic.js';
+import { cleanFeel, feelLabel } from './health.js';
 
 export function buildDaySummary(challenge, day) {
   const steps = (day && day.steps) || {};
@@ -54,11 +56,14 @@ export function buildDayDetails(challenge, day, { flexOn = false } = {}) {
     const rows = [];
     if (s.type === 'food') {
       const meals = (e && Array.isArray(e.meals)) ? e.meals : [];
-      for (const meal of meals) {
-        const row = { title: meal.dish || 'Meal', sub: `${meal.calories} kcal · ${macroInlineLine(meal.macros)}` };
+      for (const meal of sortMealsByAt(meals)) {
+        const time = mealTimeLabel(meal.at);
+        const row = { title: time ? `${time} · ${meal.dish || 'Meal'}` : (meal.dish || 'Meal'), sub: `${meal.calories} kcal · ${macroInlineLine(meal.macros)}` };
         if (meal.photoId) row.photoId = meal.photoId;
         rows.push(row);
       }
+      const feel = cleanFeel(e && e.feel);
+      if (feel.length) rows.push({ title: 'Feel', sub: feel.map(feelLabel).join(', ') });
       if (meals.length) {
         const total = meals.reduce((t, m) => t + (Number.isFinite(m && m.calories) ? m.calories : 0), 0);
         rows.push({ title: 'Total', sub: `${Math.round(total)} kcal · ${macroInlineLine(mealsMacros(meals))}` });
@@ -115,4 +120,27 @@ export function buildPhotoProgress(challenge, daysMap, attempt, photoStepId, num
   }
 
   return { tiles, change };
+}
+
+// Groups a day's photos by the step they belong to. One group per step with
+// at least one photo, ordered body, food, workout, then the rest in
+// challenge step order. `kind` mirrors stepKind() in js/ui/dom.js.
+const KIND_ORDER = ['body', 'food', 'workout'];
+export function groupPhotosByStep(challenge, photos) {
+  const steps = (challenge && challenge.steps) || [];
+  const groups = [];
+  for (const p of photos || []) {
+    let g = groups.find((x) => x.stepId === p.stepId);
+    if (!g) {
+      const step = steps.find((st) => st.id === p.stepId);
+      const t = step && step.type;
+      const kind = ['food', 'workout', 'steps', 'water', 'body', 'sleep'].includes(t) ? t : 'custom';
+      g = { stepId: p.stepId, name: (step && step.name) || p.stepName, kind, order: step ? steps.indexOf(step) : steps.length, photos: [] };
+      groups.push(g);
+    }
+    g.photos.push(p);
+  }
+  const rank = (g) => { const i = KIND_ORDER.indexOf(g.kind); return i < 0 ? KIND_ORDER.length : i; };
+  return groups.sort((a, b) => rank(a) - rank(b) || a.order - b.order)
+    .map(({ stepId, name, kind, photos: ph }) => ({ stepId, name, kind, photos: ph }));
 }

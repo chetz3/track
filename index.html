@@ -17,6 +17,37 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" crossorigin>
   <link rel="stylesheet" href="./css/styles.css" />
   <script src="./vendor/d3.v7.min.js" defer></script>
+  <script>
+    // Dev host only: report load/parse errors (including JS module failures
+    // that stop the app before it starts) to the dev server's request log.
+    (function () {
+      if (!/^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(location.hostname)) return;
+      var send = function (kind, msg) {
+        try { new Image().src = './__err?' + encodeURIComponent((kind + ': ' + msg + ' | ' + navigator.userAgent).slice(0, 1800)); } catch (_) {}
+      };
+      window.addEventListener('error', function (e) {
+        var t = e.target;
+        if (t && t !== window && (t.src || t.href)) { send('load-fail', t.src || t.href); return; }
+        send('error', (e.message || '') + ' @ ' + (e.filename || '') + ':' + (e.lineno || '') + ':' + (e.colno || '') + ' ' + ((e.error && e.error.stack) || '').split('\n').slice(0, 3).join(' <- '));
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) { send('rejection', (e.reason && (e.reason.message + ' ' + e.reason.stack)) || String(e.reason)); });
+      // Cache-bust every JS module on dev hosts via an import map, so a phone
+      // can never pair a fresh module with a stale cached one.
+      try {
+        var v = String(Date.now()), files = ["./js/app.js", "./js/backup.js", "./js/chartMath.js", "./js/coach.js", "./js/config.js", "./js/db.js", "./js/dev/mock.js", "./js/dev/mockReview.js", "./js/dev/mockSuggest.js", "./js/dish.js", "./js/exif.js", "./js/fitness.js", "./js/foodLogic.js", "./js/gemini.js", "./js/googleAuth.js", "./js/health.js", "./js/mealPlan.js", "./js/migrate.js", "./js/photos.js", "./js/planLogic.js", "./js/reminderRunner.js", "./js/reminders.js", "./js/rules.js", "./js/store.js", "./js/storeLogic.js", "./js/summaryModel.js", "./js/trend.js", "./js/ui/aiKeySheet.js", "./js/ui/calendar.js", "./js/ui/camera.js", "./js/ui/challenges.js", "./js/ui/dom.js", "./js/ui/fx.js", "./js/ui/planner.js", "./js/ui/reviewSheet.js", "./js/ui/sheet.js", "./js/ui/stats.js", "./js/ui/stepEditor.js", "./js/ui/summary.js", "./js/ui/today.js"];
+        var imports = {};
+        for (var i = 0; i < files.length; i++) imports[new URL(files[i], location.href).href] = files[i] + '?v=' + v;
+        var map = document.createElement('script');
+        map.type = 'importmap';
+        map.textContent = JSON.stringify({ imports: imports });
+        document.currentScript.after(map);
+      } catch (_) {}
+      setTimeout(function () {
+        var app = document.getElementById('app');
+        if (app && !app.children.length) send('stuck', 'app still empty after 6s');
+      }, 6000);
+    })();
+  </script>
 </head>
 <body>
   <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false">
@@ -37,6 +68,7 @@
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
     <symbol id="i-infinity" viewBox="0 0 48 24"><path d="M24 12c-4-6-8-9-12.5-9a9 9 0 0 0 0 18c4.5 0 8.5-3 12.5-9s8-9 12.5-9a9 9 0 0 1 0 18c-4.5 0-8.5-3-12.5-9z" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></symbol>
+    <symbol id="i-plan" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2M12 11h4M12 16h4M8 11h.01M8 16h.01"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   </svg>
   <header class="appbar"><img src="./icons/logo.svg" alt="" width="28" height="28" /><span class="appbar-name" aria-label="FueLoop"><span aria-hidden="true">FueL</span><svg class="wordmark-inf" aria-hidden="true" viewBox="0 0 48 24"><use href="#i-infinity"/></svg><span aria-hidden="true">p</span></span></header>
@@ -44,10 +76,11 @@
   <main id="app"></main>
   <nav class="tabbar" id="tabbar" hidden>
     <a href="#/today" data-route="today"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span>Today</span></a>
+    <a href="#/plan" data-route="plan"><svg class="icon" aria-hidden="true"><use href="#i-plan"/></svg><span>Plan</span></a>
     <a href="#/calendar" data-route="calendar"><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg><span>Calendar</span></a>
     <a href="#/stats" data-route="stats"><svg class="icon" aria-hidden="true"><use href="#i-stats"/></svg><span>Stats</span></a>
     <a href="#/challenges" data-route="challenges"><svg class="icon" aria-hidden="true"><use href="#i-trophy"/></svg><span>Challenges</span></a>
   </nav>
-  <script type="module" src="./js/app.js"></script>
+  <script type="module">import "./js/app.js";</script>
 </body>
 </html>

@@ -6,7 +6,8 @@
 // is sent as the x-goog-api-key header on each request.
 
 import { parseCalorieResult } from './foodLogic.js';
-import { parseMealPlan, planTotals, kcalWarning, eatingWindow } from './mealPlan.js';
+import { parseMealPlan, planTotals, kcalWarning, eatingWindow, compactSuggestInput } from './mealPlan.js';
+import { REVIEW_SCHEMA, reviewPrompt, parseReview } from './coach.js';
 
 // Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
 export const GEMINI_KEY_RE = /^[A-Za-z0-9._-]{20,}$/;
@@ -23,6 +24,18 @@ export function getGeminiKey() {
 
 function notifyKeyChange() {
   try { window.dispatchEvent(new Event('fueloop:aikey')); } catch (_) { /* no window */ }
+}
+
+// True when an AI call can run: a saved key, or (dev host only) the
+// ?mock=1 canned-answer mode, so the AI screens can be tested without a key.
+export function aiAvailable() {
+  if (getGeminiKey()) return true;
+  try {
+    return localStorage.getItem('tracker:mockGemini') === '1'
+      && /^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(location.hostname);
+  } catch (_) {
+    return false;
+  }
 }
 
 export function setGeminiKey(key) {
@@ -201,6 +214,17 @@ export async function estimateCalories(blob, note) {
   return parseCalorieResult(parsed);
 }
 
+// Dev-only: prompt size, so the token budget can be watched in the console
+// (about 4 characters per token). Never logs on the live site.
+function logPromptSize(label, text) {
+  try {
+    const h = location.hostname;
+    if (h === 'localhost' || h === '127.0.0.1' || /^192\.168\.|^10\./.test(h)) {
+      console.log(`[gemini] ${label} prompt: ${text.length} chars ≈ ${Math.round(text.length / 4)} tokens`);
+    }
+  } catch (_) { /* no location */ }
+}
+
 // ---------- meal suggestions (docs §2, §4, §5) ----------
 
 const SUGGEST_SCHEMA = {
@@ -222,6 +246,8 @@ const SUGGEST_SCHEMA = {
           fat_g: { type: 'INTEGER' },
           fiber_g: { type: 'INTEGER' },
           swap_for: { type: 'STRING' },
+          is_new: { type: 'BOOLEAN' },
+          local_note: { type: 'STRING' },
           ingredients: {
             type: 'ARRAY',
             items: {
@@ -244,13 +270,20 @@ const SUGGEST_SCHEMA = {
   },
 };
 
-// The diet preference as a hard rule for the prompt (meal suggest v2 §2).
+// The diet preference as a hard rule for the prompt (meal suggest v2 §2),
+// shortened for the R3 prompt (docs §12.1).
 const PREF_RULES = {
-  veg: 'Diet preference (hard rule): Veg. No meat, fish or eggs in any meal.',
-  vegan: 'Diet preference (hard rule): Vegan. No meat, fish, eggs, dairy or honey in any meal.',
-  egg: 'Diet preference (hard rule): Egg. Vegetarian food plus eggs; no meat or fish.',
-  nonveg: 'Diet preference (hard rule): Non-veg. Every meal that can include meat, fish or eggs should.',
-  mix: 'Diet preference (hard rule): Mix. At least 1 vegetarian meal and at least 1 non-veg meal (meat, fish or egg).',
+  veg: 'Veg only: no meat, fish or egg.',
+  vegan: 'Vegan only: no meat, fish, egg, dairy or honey.',
+  egg: 'Egg diet: veg plus eggs; no meat or fish.',
+  nonveg: 'Non-veg: include meat, fish or egg wherever it fits.',
+  mix: 'Mix: ≥ 1 veg meal and ≥ 1 meat/fish/egg meal.',
+};
+
+const VARIETY_RULES = {
+  familiar: 'mostly dishes from freq, made healthier; at most 1 new dish.',
+  balanced: 'at least half the dishes not in freq.',
+  explore: 'every dish not in freq.',
 };
 
 // Builds the "suggest one dish per slot" instruction from profile.schedule
@@ -262,35 +295,46 @@ function scheduleLines(schedule) {
   const slots = (schedule && Array.isArray(schedule.slots)) ? schedule.slots : [];
   const slotList = slots.map((s) => `${s.name} (${s.time})`).join(', ');
   const win = eatingWindow(schedule);
-  const windowLine = win
-    ? `\nThis person eats within a fasting window, ${win.start}–${win.end}. Never suggest food outside that window.`
-    : '';
+  const windowLine = win ? ` Eat only ${win.start}–${win.end} (fasting window).` : '';
   return { count: slots.length || 1, slotList, windowLine };
 }
 
-function suggestPrompt(input, avoidDishes) {
-  const { count, slotList, windowLine } = scheduleLines(input.profile && input.profile.schedule);
-  const avoidLine = Array.isArray(avoidDishes) && avoidDishes.length
-    ? `\nDo not repeat these dishes from the previous plan: ${avoidDishes.join(', ')}.`
+// docs §12.1, verbatim apart from the ${} wiring. If the built prompt is over
+// SUGGEST_BUDGET_CHARS the lowest-count freq rows are dropped until it fits.
+export const SUGGEST_BUDGET_CHARS = 6000;
+
+export function suggestPrompt(input, avoidDishes, forDay = 'tomorrow') {
+  const { slotList, windowLine } = scheduleLines(input.profile && input.profile.schedule);
+  const data = compactSuggestInput(input, avoidDishes);
+  const variety = VARIETY_RULES[input.variety] ? input.variety : 'balanced';
+  const t = input.targets || {};
+  const kcal = Number.isFinite(t.kcal) ? t.kcal : 'their target';
+  const protein = Number.isFinite(t.protein) ? t.protein : 0;
+  const fiber = Number.isFinite(t.fiber) ? t.fiber : 0;
+  const location = (input.profile && input.profile.location) || 'their city';
+  const prefRule = PREF_RULES[input.pref] || PREF_RULES[input.profile && input.profile.diet] || 'Follow their diet.';
+  const coachRule = data.coach
+    ? '\n6b. Fix coach.mistakes and follow coach.changes; prefer coach.foods. Name the mistake fixed in fixes.'
     : '';
-  return `You are a nutrition planner. Suggest a ${count}-meal plan for tomorrow for this person, one dish for each of these exact time slots: ${slotList}.
-Rules, in this order:
-1. Stay in the cuisine they actually eat. Work out their eating style from recentDishes and yesterday.dishes (e.g. South Indian: idli, dosa, ragi mudde, sambar, rice + curry), with profile.cuisine as a hint and profile.location for what is common and available there. Every dish must be one people in that region routinely eat at home or in local eateries. Never switch cuisine: no Italian, Mexican, continental or other out-of-pattern dishes for someone who eats South Indian food.
-2. Suggest familiar, similar dishes, not novelty: the same kinds of dishes they already eat, or close local variants of them, made healthier (e.g. more dal/eggs/chicken/paneer, less rice, more vegetables, less oil).
-3. Close yesterday's gaps (see yesterday.gaps: a "short" status means eat more of it, "over" means less) within that cuisine, e.g. "protein was 70 of 155 g: add egg bhurji with dosa, chicken sukka, extra dal".
-4. Don't copy yesterday's plate exactly: no dish from yesterday.dishes in the same slot, and at least half the dishes should differ from yesterday's.
-5. ${PREF_RULES[input.pref] || PREF_RULES[input.profile && input.profile.diet] || 'Follow their diet.'} Also follow their diet and avoid list strictly; never include a dish or ingredient that clashes with them.
-6. Fit the schedule's slots and times, and hit the calorie and macro targets.${windowLine}
-Use the exact slot name given above as "slot" in your response, one dish per slot, each with a portion size and its kcal and grams of protein/carbs/fat/fiber (integers). Set swap_for to a lighter alternative when relevant, otherwise leave it blank.
-ingredients: for each meal, list its ingredients for 1 serving in raw/uncooked quantities, each with name, qty (number), unit (g, ml, pcs, tbsp, tsp, cup or bunch) and category (vegetables, fruits, dairy, meat_fish_eggs, grains, pulses, spices_oils or other).
-fixes: up to 3 short lines saying how this plan fixes yesterday's gaps, e.g. "Protein: 70 → 150 g with eggs, chicken, dal".
-why: 2-3 short lines tied to the last 7 days' actual eating.
-tips: up to 3 short, practical tips.${avoidLine}
-
-Person and data (JSON):
-${JSON.stringify(input)}
-
-Respond only with JSON matching the schema.`;
+  const build = () => `Plan meals for ${forDay} (${input.month || ''}). One dish per slot: ${slotList}.${windowLine}
+Legend: y=yesterday [dish,kcal,p,c,f,fib,time]; gaps=[nutrient,yesterday,target,short|over]; freq=[dish,times] last 14 days; recent=dishes in last 3 plans; avoid=never use; coach=fixes from their weight review.
+Rules:
+1. Only dishes of their regional cuisine (freq, cuisine, location). No other cuisines.
+2. ${prefRule} Follow diet and avoid strictly.
+3. Variety ${variety}: ${VARIETY_RULES[variety]}
+4. No dish from recent or y. No dish twice in this plan.
+5. Any dish not in freq must be commonly eaten or sold in ${location}, in season, cookable on a weekday.
+6. Close gaps: short → more of it, over → less.${coachRule}
+7. Day total within ±5% of ${kcal} kcal. Push protein toward ${protein} g and fibre toward ${fiber} g with real foods; report true values, never inflate them to hit a target.
+8. Realistic home portions; kcal and macros must match the portion. Ingredients = what the dish is really made of.
+Output: ingredients for 1 serving, raw qty. local_note ≤ 8 words (where to buy/eat). fixes ≤ 3 ("gap → how"). why ≤ 2. tips ≤ 2. Every string ≤ 15 words.
+Data:${JSON.stringify(data)}`;
+  let text = build();
+  while (text.length > SUGGEST_BUDGET_CHARS && data.freq.length > 0) {
+    data.freq.pop();
+    text = build();
+  }
+  return text;
 }
 
 // Asks Gemini for tomorrow's meal plan. `input` is js/mealPlan.js's
@@ -299,20 +343,21 @@ Respond only with JSON matching the schema.`;
 // them. Totals are always recomputed in code (planTotals), never trusted
 // from the model, and a warning is attached (not thrown) when they land
 // outside the target ±10% band — see docs §5.
-export async function suggestMeals(input, avoidDishes) {
+export async function suggestMeals(input, avoidDishes, forDay) {
   let parsed = null;
   // Dev-only canned response (js/dev/mockSuggest.js), never on the live site.
   let mockOn = false;
   try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
   if (mockOn) {
     const { isDevHost } = await import('./dev/mock.js');
-    if (isDevHost()) parsed = await (await import('./dev/mockSuggest.js')).mockSuggest(input);
+    if (isDevHost()) parsed = await (await import('./dev/mockSuggest.js')).mockSuggest(input, avoidDishes);
   }
   if (!parsed) {
-    const parts = [{ text: suggestPrompt(input, avoidDishes) }];
-    parsed = await callGemini(parts, SUGGEST_SCHEMA, { offlineMessage: "You're offline. Connect to get meal suggestions." });
+    const parts = [{ text: suggestPrompt(input, avoidDishes, forDay) }];
+    logPromptSize('suggest', parts[0].text);
+    parsed = await callGemini(parts, SUGGEST_SCHEMA, { temperature: 0.8, offlineMessage: "You're offline. Connect to get meal suggestions." });
   }
-  const plan = parseMealPlan(parsed);
+  const plan = parseMealPlan(parsed, { known: [...(input.dishFrequency || []).map((f) => f[0]), ...(input.recentPlans || []), ...(Array.isArray(avoidDishes) ? avoidDishes : [])] });
   const totals = planTotals(plan);
   const warning = kcalWarning(totals.kcal, input.targets && input.targets.kcal);
   return { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes, totals, warning };
@@ -384,4 +429,31 @@ export async function checkBody(photoBlob, profile) {
   ];
   const parsed = await callGemini(parts, BODY_SCHEMA, { offlineMessage: "You're offline. Connect to update your body check." });
   return parseBodyCheck(parsed, fallbackBmi);
+}
+
+// ---------- plateau review (plateau-coach plan §5) ----------
+
+// Asks Gemini why the weight isn't moving. `input` is js/coach.js's
+// buildReviewInput() output (already fitted to the budget); `ctx` is
+// reviewContext(input). The answer goes through parseReview, which enforces
+// the safety and no-hallucination rules in code. Mirrors suggestMeals: with
+// localStorage 'tracker:mockGemini' === '1' on a dev host it returns a canned
+// answer (js/dev/mockReview.js) built from the input itself.
+export async function reviewPlateau(input, ctx) {
+  let parsed = null;
+  let mockOn = false;
+  try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
+  const text = reviewPrompt(input);
+  logPromptSize('review', text);
+  if (mockOn) {
+    const { isDevHost } = await import('./dev/mock.js');
+    if (isDevHost()) parsed = await (await import('./dev/mockReview.js')).mockReview(input);
+  }
+  if (!parsed) {
+    parsed = await callGemini([{ text }], REVIEW_SCHEMA, {
+      temperature: 0.4,
+      offlineMessage: "You're offline. Connect to run the weight review.",
+    });
+  }
+  return parseReview(parsed, ctx);
 }

@@ -3,6 +3,7 @@
 
 import { getAll, replaceAll } from './db.js';
 import { migrateV1, dayKey } from './migrate.js';
+import { normalizeHealth } from './health.js';
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -206,12 +207,38 @@ function isValidChallenge(c) {
   return true;
 }
 
+// Plateau Coach fields (docs/superpowers/plans/2026-10-10-plateau-coach.md):
+// profile.health, plateauReview, mealPlanHistory on a challenge and `feel` on
+// a food-step entry. All optional and additive, so they're accepted loosely:
+// the right kind of value is kept, anything else is silently dropped from the
+// record (in place) and never rejects the backup.
+function sanitizeChallengeExtras(c) {
+  if (isObject(c.profile) && 'health' in c.profile) {
+    const h = normalizeHealth(c.profile.health);
+    if (h) c.profile.health = h; else delete c.profile.health;
+  }
+  if ('plateauReview' in c) {
+    if (!isObject(c.plateauReview)) delete c.plateauReview;
+    else if ('applied' in c.plateauReview && c.plateauReview.applied !== null && !isObject(c.plateauReview.applied)) c.plateauReview.applied = null;
+  }
+  if ('mealPlanHistory' in c && !Array.isArray(c.mealPlanHistory)) delete c.mealPlanHistory;
+}
+
+function sanitizeFeel(steps) {
+  for (const entry of Object.values(steps)) {
+    if (!isObject(entry) || !('feel' in entry)) continue;
+    if (Array.isArray(entry.feel)) entry.feel = entry.feel.filter((t) => typeof t === 'string');
+    else delete entry.feel;
+  }
+}
+
 export function validateV2(b) {
   const bad = () => { throw new Error('Invalid backup file'); };
   if (!Array.isArray(b.challenges) || !Array.isArray(b.attempts) || !Array.isArray(b.days) || !Array.isArray(b.photos)) bad();
   const ids = new Set();
   for (const c of b.challenges) {
     if (!isValidChallenge(c)) bad();
+    sanitizeChallengeExtras(c);
     ids.add(c.id);
   }
   for (const a of b.attempts) {
@@ -223,6 +250,7 @@ export function validateV2(b) {
     // steps must be a plain object (not null, not an array) — loadAll/reevaluate
     // iterate it with Object.entries/Object.values and crash on anything else.
     if (!isObject(d.steps)) bad();
+    sanitizeFeel(d.steps);
     // A food step entry's `meals` (logged) and `planned` (docs §9's
     // placeholders) aren't deeply validated, same as everywhere else under
     // `steps` — js/ui/today.js only ever reads them defensively
