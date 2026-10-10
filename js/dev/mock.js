@@ -2,8 +2,12 @@
 // (re)seed two challenges and open Today on the fitness one:
 // - "Mock challenge" (custom): 10 days of photos, weights and notes.
 // - "Mock fitness" (fitness): profile, schedule, every preset step with goals,
-//   10 days of meals (with macros), workouts, steps, water, sleep, weight,
-//   today's planned meals, a saved meal plan, and water reminders.
+//   21 days of meals (with macros), workouts, steps, water, sleep, weight,
+//   today's planned meals, a saved meal plan, and water reminders. The weight
+//   is a plateau on purpose (about 129 kg, +-1.5 kg, no downward trend, mostly
+//   green days, late rice dinners, "curd rice" followed by next-day bumps,
+//   low protein) so Stats shows "Fluctuating" and Today shows the coach card.
+//   Fully deterministic: same data on every seed.
 // Never runs on the live site.
 
 import { putMany } from '../db.js';
@@ -66,15 +70,51 @@ export async function seedMock(todayStr) {
 
 const FIT = 'c-mock-fit';
 
-const MEALS = [
-  { dish: 'Idli sambar', calories: 320, macros: { protein: 12, carbs: 58, fat: 5, fiber: 6 } },
-  { dish: 'Chicken curry + rice', calories: 610, macros: { protein: 38, carbs: 70, fat: 18, fiber: 4 } },
-  { dish: 'Sprouts salad', calories: 180, macros: { protein: 11, carbs: 26, fat: 3, fiber: 8 } },
-  { dish: 'Ragi mudde + saaru', calories: 420, macros: { protein: 14, carbs: 72, fat: 7, fiber: 9 } },
+const FIT_DAYS = 21;
+const RED_DAYS = [4, 11, 17]; // no workout: one red day per week (a fitness week allows two)
+// Zero-mean deterministic scale noise, within +-0.7 kg.
+const NOISE = [0.2, -0.5, 0.6, -0.3, 0.7, -0.6, 0.1, 0.4, -0.7, 0.3, -0.2, 0.5, -0.4, 0.0, 0.6, -0.5, 0.2, -0.3, 0.4, -0.6, 0.1];
+const CURD_BUMP = 0.8;
+
+const BREAKFASTS = [
+  { dish: 'Idli sambar', calories: 380, macros: { protein: 11, carbs: 70, fat: 6, fiber: 6 } },
+  { dish: 'Dosa + chutney', calories: 400, macros: { protein: 9, carbs: 68, fat: 10, fiber: 4 } },
+  { dish: 'Upma', calories: 360, macros: { protein: 8, carbs: 62, fat: 9, fiber: 4 } },
 ];
+const LUNCHES = [
+  { dish: 'Veg meals + sambar rice', calories: 620, macros: { protein: 16, carbs: 105, fat: 14, fiber: 8 } },
+  { dish: 'Ragi mudde + saaru', calories: 580, macros: { protein: 15, carbs: 108, fat: 7, fiber: 9 } },
+  { dish: 'Lemon rice + curd', calories: 600, macros: { protein: 14, carbs: 100, fat: 14, fiber: 4 } },
+];
+const RICE_DINNER = { dish: 'Rice + dal dinner', calories: 520, macros: { protein: 14, carbs: 96, fat: 8, fiber: 6 } };
+const CURD_DINNER = { dish: 'Curd rice', calories: 500, macros: { protein: 12, carbs: 80, fat: 14, fiber: 2 } };
+const LIGHT_DINNER = { dish: 'Veg soup + chapati', calories: 460, macros: { protein: 13, carbs: 70, fat: 10, fiber: 7 } };
+
+function atLocal(dateStr, hh, mm) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d, hh, mm).getTime();
+}
+
+function mealsForDay(i) {
+  const curd = i % 3 === 1;
+  const dinner = curd ? CURD_DINNER : i % 2 === 0 ? RICE_DINNER : LIGHT_DINNER;
+  const late = i % 2 === 0; // late dinners on about half the days
+  return [
+    { ...BREAKFASTS[[0, 1, 2, 1, 0, 2, 1][i % 7]], time: [8, 30] },
+    { ...LUNCHES[Math.floor(i / 3) % 3], time: [13, 30] },
+    { ...dinner, time: late ? [21, 15] : [19, 30] },
+  ];
+}
+
+// Day i's weigh-in: about 129 kg with no trend; the morning after curd rice
+// reads 0.8 kg higher.
+function mockWeight(i) {
+  const bump = i > 0 && (i - 1) % 3 === 1 ? CURD_BUMP : 0;
+  return +(129 + NOISE[i % NOISE.length] + bump).toFixed(1);
+}
 
 async function fitnessEntries(todayStr) {
-  const start = addDays(todayStr, -9);
+  const start = addDays(todayStr, -(FIT_DAYS - 1));
   const profile = {
     sex: 'male', age: 32, heightCm: 180, startWeightKg: 129.5, targetWeightKg: 116.5,
     activity: 'light', aim: 'lose', location: 'Bengaluru, Karnataka', cuisine: 'South Indian',
@@ -106,17 +146,18 @@ async function fitnessEntries(todayStr) {
     { store: 'challenges', value: challenge },
     { store: 'attempts', value: { id: FIT, challengeId: FIT, startDate: start, status: 'active', greenWeeks: 0 } },
   ];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < FIT_DAYS; i++) {
     const date = addDays(start, i);
-    const isToday = i === 9;
+    const isToday = i === FIT_DAYS - 1;
     const daySteps = {};
     // Today: 2 meals logged so far; other days 3.
     const meals = [];
+    const planned = mealsForDay(i);
     for (let m = 0; m < (isToday ? 2 : 3); m++) {
-      const base = MEALS[(i + m) % MEALS.length];
+      const base = planned[m];
       const photoId = `photo-mock-fit-${i}-${m}`;
       entries.push({ store: 'photos', value: { id: photoId, blob: await fakePhoto(base.dish, 20 + m * 40), createdAt: Date.now() } });
-      meals.push({ id: `meal-mock-${i}-${m}`, photoId, dish: base.dish, calories: base.calories, macros: base.macros, items: [], at: Date.now() });
+      meals.push({ id: `meal-mock-${i}-${m}`, photoId, dish: base.dish, calories: base.calories, macros: base.macros, items: [], at: atLocal(date, base.time[0], base.time[1]) });
     }
     daySteps.food = buildFoodPatch({}, meals);
     if (isToday) {
@@ -125,17 +166,19 @@ async function fitnessEntries(todayStr) {
           macros: { protein: 40, carbs: 20, fat: 18, fiber: 6 }, source: 'ai' },
       ];
     }
-    const minutes = i % 4 === 3 ? 0 : 30 + (i % 3) * 10;
+    const minutes = RED_DAYS.includes(i) ? 0 : 30 + (i % 3) * 10;
     if (minutes) {
       daySteps.workout = { sessions: [{ id: `ws-mock-${i}`, type: i % 2 ? 'Gym' : 'Walk', minutes, intensity: 'moderate', kcal: minutes * 7 }], value: minutes, burn: minutes * 7 };
     }
-    daySteps.steps = { value: 6000 + i * 400 };
-    daySteps.water = { value: isToday ? 1.5 : 3.5 + (i % 3) * 0.5 };
-    if (!isToday) daySteps.sleep = { value: 6.5 + (i % 4) * 0.5 };
+    daySteps.steps = { value: 8200 + (i % 5) * 300 };
+    daySteps.water = { value: isToday ? 1.5 : 4.6 + (i % 3) * 0.2 };
+    if (!isToday) daySteps.sleep = { value: 7.5 + (i % 4) * 0.25 };
+    // A weigh-in every day (a photo every third day).
+    daySteps.body = { value: mockWeight(i), done: true };
     if (i % 3 === 0) {
       const bodyId = `photo-mock-fit-body-${i}`;
       entries.push({ store: 'photos', value: { id: bodyId, blob: await fakePhoto(`Body · Day ${i + 1}`, 300), createdAt: Date.now() } });
-      daySteps.body = { value: +(129.5 - i * 0.25).toFixed(1), photoId: bodyId, done: true };
+      daySteps.body.photoId = bodyId;
     }
     entries.push({ store: 'days', value: { key: dayKey(FIT, date), challengeId: FIT, date, mandatoryStepIds: mandatory, targets, steps: daySteps } });
   }

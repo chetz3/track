@@ -5,6 +5,7 @@
 
 import { addDays } from './rules.js';
 import { placeholderStatus } from './mealPlan.js';
+import { normDish } from './dish.js';
 
 // ---------- meal times ----------
 
@@ -37,15 +38,7 @@ export function isPlannableDate(date, today) {
 
 // ---------- planned-meal merging ----------
 
-// Dish name normalised for "same dish" comparisons: lower-cased, punctuation
-// dropped, whitespace collapsed.
-export function normDish(s) {
-  return String(s == null ? '' : s)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+export { normDish } from './dish.js';
 
 function slotKey(p) {
   return String((p && p.slot) || '').trim().toLowerCase();

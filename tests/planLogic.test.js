@@ -84,3 +84,9 @@ test('replaceKeepingLogged skips incoming items for a slot that is already logge
   const out = replaceKeepingLogged(planned, meals, [{ id: 'x', slot: 'Lunch', dish: 'Ragi mudde' }, { id: 'y', slot: 'Dinner', dish: 'Dosa' }]);
   assert.deepEqual(out.map((p) => p.id), ['a', 'y']);
 });
+
+test('normDish treats simple plurals as the same dish', () => {
+  assert.equal(normDish('Idlis'), normDish('idli'));
+  assert.equal(normDish('Masala Dosas'), 'masala dosa');
+  assert.equal(normDish('Dal'), 'dal');
+});

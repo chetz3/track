@@ -412,3 +412,18 @@ body { padding: env(safe-area-inset-top) 0 calc(104px + env(safe-area-inset-bott
 .ai-welcome-card p { margin: 0; }
 .ai-welcome-card .ai-welcome-head { font-weight: 700; margin-bottom: 4px; }
 .ai-welcome-card .icon { width: 16px; height: 16px; vertical-align: -3px; }
+/* ---------- Plateau coach (R1): weight trend + coach card ---------- */
+.trend-range { display: inline-flex; gap: 4px; background: var(--raised); border-radius: 12px; padding: 3px; }
+.trend-range button { min-height: 44px; min-width: 56px; padding: 0 14px; border: 0; border-radius: 10px; background: transparent; color: var(--text2); font: 700 13px var(--font); cursor: pointer; }
+.trend-range button[aria-pressed="true"] { background: var(--grouped); color: var(--accent-ink); box-shadow: var(--shadow-press); }
+.trend-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.trend-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 0 8px; font-size: 14px; color: var(--text2); }
+.trend-status .pill { height: auto; min-height: 28px; padding: 4px 12px; white-space: normal; }
+.trend-status-sub { padding: 0 8px; margin: 0; font-size: 13px; color: var(--text2); }
+.trend-empty { padding: 16px; margin: 0; color: var(--text2); font-size: 14px; }
+.trend-dot { fill: var(--c-body); fill-opacity: .4; }
+.trend-line { fill: none; stroke: var(--c-body); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.coach-card { margin-top: 12px; padding: 14px 16px; border-radius: var(--group-radius); background: var(--accent-soft); color: var(--text); display: flex; flex-direction: column; gap: 12px; }
+.coach-card p { margin: 0; font-size: 15px; line-height: 1.4; }
+.coach-card strong { font-weight: 800; }
+.coach-card .btn-pair { gap: 8px; }

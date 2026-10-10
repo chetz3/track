@@ -13,6 +13,8 @@ import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
+import { trendStatus, weekCheck, isDietBreakActive } from '../trend.js';
+import { openReviewEntry } from './reviewSheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
 import { mealTimeLabel, sortMealsByAt, mergeAddToExisting, replaceKeepingLogged } from '../planLogic.js';
 import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey } from '../mealPlan.js';
@@ -1972,6 +1974,16 @@ function wireDelegation(root) {
       navigateBackOrDone(true);
       return;
     }
+    if (e.target.closest('[data-role="coach-why"]')) {
+      const c = store.selected();
+      if (c) openReviewEntry(c);
+      return;
+    }
+    if (e.target.closest('[data-role="coach-later"]')) {
+      try { localStorage.setItem(COACH_DISMISS_KEY, addDays(store.today(), COACH_DISMISS_DAYS)); } catch (_) { /* storage blocked */ }
+      if (current) current.rerender();
+      return;
+    }
     const summaryBtn = e.target.closest('[data-role="view-summary"]');
     if (summaryBtn) {
       location.hash = `#/summary/${summaryBtn.dataset.date}`;
@@ -2180,6 +2192,52 @@ function wireDelegation(root) {
 
 // ---------- main render ----------
 
+// ---------- plateau coach card (R1) ----------
+
+const COACH_DISMISS_KEY = 'tracker:coachDismissedUntil';
+const COACH_MIN_ADHERENCE = 70;
+const COACH_DISMISS_DAYS = 7;
+
+function coachDismissedUntil() {
+  try { return localStorage.getItem(COACH_DISMISS_KEY) || ''; } catch (_) { return ''; }
+}
+
+// Card above the steps on Today for fitness challenges with a body step:
+// plateau/fluctuating/gaining with >= 70 % adherence, or a stalled week.
+function coachCardHtml(challenge, attempt, todayStr) {
+  if (challenge.category !== 'fitness' || !attempt) return '';
+  if (!challenge.steps.some((st) => st.type === 'body')) return '';
+  if (isDietBreakActive(challenge)) return '';
+  if (todayStr < coachDismissedUntil()) return '';
+  const daysMap = store.state.days[challenge.id] || {};
+  const opts = { startDate: attempt.startDate };
+  const t = trendStatus(challenge, daysMap, todayStr, { ...opts, windowDays: 14 });
+  const adherence = t.adherencePct ?? 0;
+  const trendHit = ['plateau', 'fluctuating', 'gaining'].includes(t.status) && adherence >= COACH_MIN_ADHERENCE;
+  const wk = trendHit ? null : weekCheck(challenge, daysMap, todayStr, opts);
+  if (!trendHit && !(wk && wk.stalled)) return '';
+
+  const kg = (n) => Math.round(Math.abs(n) * 10) / 10;
+  let text;
+  if (!trendHit) {
+    text = `Weight hasn't dropped this week although you hit <strong>${esc(wk.greenDays)} of 7</strong> days. Let's find out why.`;
+  } else if (t.status === 'gaining') {
+    text = `Weight up <strong>${esc(kg(t.changeKg))} kg</strong> while you hit <strong>${esc(adherence)} %</strong> of days. Let's find out why.`;
+  } else {
+    const flatDays = Math.max(1, diffDays(t.stalledSince || addDays(todayStr, -13), todayStr) + 1);
+    text = t.status === 'fluctuating'
+      ? `Weight bouncing <strong>±${esc(kg(t.rangeKg / 2))} kg</strong> for <strong>${esc(flatDays)} days</strong> while you hit <strong>${esc(adherence)} %</strong> of days. Let's find out why.`
+      : `Weight flat for <strong>${esc(flatDays)} days</strong> while you hit <strong>${esc(adherence)} %</strong> of days. Let's find out why.`;
+  }
+  return `<div class="coach-card" role="region" aria-label="Weight coach">
+    <p>${text}</p>
+    <div class="btn-pair">
+      <button type="button" class="btn btn-primary" data-role="coach-why">Find out why</button>
+      <button type="button" class="btn btn-secondary" data-role="coach-later">Later</button>
+    </div>
+  </div>`;
+}
+
 async function renderScreen(root, { date, dayRoute }) {
   // Belt-and-braces alongside the hashchange reset: any render at all means
   // the app is live and responsive again, so a `navigating` guard left over
@@ -2241,6 +2299,7 @@ async function renderScreen(root, { date, dayRoute }) {
   </div>`;
 
   const eatingWindowHtml = eatingWindowLineHtml(challenge, date, todayStr);
+  const coachHtml = !dayRoute && date === todayStr ? coachCardHtml(challenge, attempt, todayStr) : '';
 
   const flexOn = store.flexDatesFor(challenge.id).has(date);
   const stepsHtml = challenge.steps.map((step) => {
@@ -2278,6 +2337,7 @@ async function renderScreen(root, { date, dayRoute }) {
   root.innerHTML = `${headerHtml}
     ${heroHtml}
     ${eatingWindowHtml}
+    ${coachHtml}
     ${summaryBtnHtml}
     <div class="section">
       <h2 class="section-header">${sectionTitle}</h2>
