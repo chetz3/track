@@ -122,3 +122,19 @@ test('buildDayDetails headline with a target and no value; step with no entry', 
   assert.deepEqual(d[2], { stepId: 'read', name: 'Read', mandatory: false, complete: false, headline: '—', rows: [] });
   assert.equal(buildDayDetails(fch, undefined).length, 3);
 });
+
+test('groupPhotosByStep orders body, food, workout, then step order', async () => {
+  const { groupPhotosByStep } = await import('../js/summaryModel.js');
+  const c = { steps: [
+    { id: 'a', name: 'Custom', type: 'custom' }, { id: 'w', name: 'Gym', type: 'workout' },
+    { id: 'f', name: 'Food', type: 'food' }, { id: 'b', name: 'Body', type: 'body' },
+  ] };
+  const g = groupPhotosByStep(c, [
+    { stepId: 'a', stepName: 'Custom', photoId: '1' }, { stepId: 'f', stepName: 'Food', photoId: '2' },
+    { stepId: 'f', stepName: 'Food', photoId: '3' }, { stepId: 'w', stepName: 'Gym', photoId: '4' },
+    { stepId: 'b', stepName: 'Body', photoId: '5' },
+  ]);
+  assert.deepEqual(g.map((x) => x.stepId), ['b', 'f', 'w', 'a']);
+  assert.equal(g[1].photos.length, 2);
+  assert.deepEqual(groupPhotosByStep(c, []), []);
+});
