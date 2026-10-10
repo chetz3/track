@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v49';
+const CACHE_NAME = 'tracker-shell-v50';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -74,6 +74,18 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
+
+  // Dev hosts (localhost / LAN): network first, so files edited between
+  // version bumps are never mixed with older cached ones. Cache is only the
+  // offline fallback here. The live site keeps stale-while-revalidate below.
+  if (url.origin === self.location.origin && /^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(self.location.hostname)) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .catch(() => caches.match(event.request, { cacheName: CACHE_NAME }))
+        .then((res) => res || Response.error()),
+    );
+    return;
+  }
 
   if (url.origin === self.location.origin) {
     // `cache: 'no-cache'` makes the browser revalidate with the server

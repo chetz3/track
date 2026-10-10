@@ -247,8 +247,21 @@ onAuthChange(() => scheduleRender());
 // another tab, private-mode quota, a corrupt DB) or store.loadAll() choked on
 // bad data. Without this the app was a permanently blank white screen with no
 // way out but to already know to hard-reload.
+// Dev host only (localhost / LAN): report errors to the dev server's request
+// log as a GET beacon, so phone-only failures can be read on the Mac.
+function devReport(kind, err) {
+  try {
+    if (!/^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(location.hostname)) return;
+    const msg = `${kind}: ${err && err.message} @ ${(err && err.stack || '').split('\n').slice(0, 4).join(' <- ')} | ${navigator.userAgent}`;
+    new Image().src = `./__err?${encodeURIComponent(msg.slice(0, 1500))}`;
+  } catch (_) { /* never let reporting break anything */ }
+}
+window.addEventListener('error', (e) => devReport('error', e.error || { message: e.message, stack: `${e.filename}:${e.lineno}` }));
+window.addEventListener('unhandledrejection', (e) => devReport('rejection', e.reason));
+
 function renderBootError(err) {
   console.error('Boot failed:', err);
+  devReport('boot', err);
   tabbarEl.hidden = true;
   appEl.innerHTML = `
     <h1 class="large-title">Couldn't open your data</h1>
