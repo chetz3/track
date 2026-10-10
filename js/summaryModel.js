@@ -6,6 +6,7 @@ import { isStepComplete, isNumberValue, diffDays } from './rules.js';
 import { targetFor } from './fitness.js';
 import { macroInlineLine, mealsMacros } from './foodLogic.js';
 import { mealTimeLabel, sortMealsByAt } from './planLogic.js';
+import { cleanFeel, feelLabel } from './health.js';
 
 export function buildDaySummary(challenge, day) {
   const steps = (day && day.steps) || {};
@@ -61,6 +62,8 @@ export function buildDayDetails(challenge, day, { flexOn = false } = {}) {
         if (meal.photoId) row.photoId = meal.photoId;
         rows.push(row);
       }
+      const feel = cleanFeel(e && e.feel);
+      if (feel.length) rows.push({ title: 'Feel', sub: feel.map(feelLabel).join(', ') });
       if (meals.length) {
         const total = meals.reduce((t, m) => t + (Number.isFinite(m && m.calories) ? m.calories : 0), 0);
         rows.push({ title: 'Total', sub: `${Math.round(total)} kcal · ${macroInlineLine(mealsMacros(meals))}` });

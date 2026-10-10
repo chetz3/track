@@ -138,3 +138,11 @@ test('groupPhotosByStep orders body, food, workout, then step order', async () =
   assert.equal(g[1].photos.length, 2);
   assert.deepEqual(groupPhotosByStep(c, []), []);
 });
+
+test('buildDayDetails food adds a Feel row when feel tags are set', () => {
+  const day = { ...fday, steps: { ...fday.steps, food: { ...fday.steps.food, feel: ['bloated', 'cravings', 'bogus'] } } };
+  const food = buildDayDetails(fch, day)[0];
+  const feel = food.rows.find((r) => r.title === 'Feel');
+  assert.equal(feel.sub, 'Bloated, Cravings');
+  assert.equal(buildDayDetails(fch, fday)[0].rows.some((r) => r.title === 'Feel'), false);
+});

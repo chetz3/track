@@ -23,6 +23,7 @@ import { presetSteps, dirLabel, goalPlan, latestBodyPhotoId } from '../fitness.j
 import { connect, disconnect, getAuthState, clearAuthError } from '../googleAuth.js';
 import { getGeminiKey, setGeminiKey, clearGeminiKey, GEMINI_KEY_RE } from '../gemini.js';
 import { defaultSlots, ifSlots, scheduleOf } from '../mealPlan.js';
+import { CONDITIONS, MEDS_FLAGS, LAB_FIELDS, emptyHealthDraft, healthToDraft, draftToHealth } from '../health.js';
 
 // Fitness weeks need 5 green days; the 3rd red day in a week resets.
 const FITNESS_WEEKLY_TARGET = 5;
@@ -362,6 +363,7 @@ function defaultProfileDraft() {
   return {
     sex: 'male', age: '30', heightCm: '170', startWeightKg: '70', targetWeightKg: '65', activity: 'sedentary', aim: 'maintain',
     location: '', cuisine: '', diet: '', avoid: '', schedule: defaultSchedule(), shareBodyPhoto: false,
+    health: emptyHealthDraft(),
   };
 }
 
@@ -385,6 +387,7 @@ function profileToDraft(p) {
     // challenge's profile in place.
     schedule: { ...sched, slots: sched.slots.map((s) => ({ ...s })) },
     shareBodyPhoto: !!p.shareBodyPhoto,
+    health: healthToDraft(p.health),
   };
 }
 
@@ -395,6 +398,7 @@ function profileToDraft(p) {
 // shareBodyPhoto — docs §2, §9) are loosely typed and never block saving the
 // profile itself; canSuggest/js/ui/today.js gate on diet being set instead.
 function parseProfileDraft(p) {
+  const health = draftToHealth(p.health);
   return {
     sex: p.sex,
     age: parseIntStrict(p.age),
@@ -417,6 +421,9 @@ function parseProfileDraft(p) {
         : [],
     },
     shareBodyPhoto: !!p.shareBodyPhoto,
+    // Optional health info (Plateau Coach): the key is omitted when empty so
+    // a profile without it stays exactly as it was.
+    ...(health ? { health } : {}),
   };
 }
 
@@ -597,6 +604,63 @@ function bodyCheckCardHtml(challenge, draft) {
   </div>`;
 }
 
+// ---- Health (optional, helps the AI coach) ----
+
+let healthOpen = false; // whether the collapsible Health group is expanded
+
+function healthChipsHtml(group, options, selected) {
+  return `<div class="health-chips" role="group">${options.map(([v, l]) =>
+    `<button type="button" class="feel-chip" data-role="health-chip" data-group="${group}" data-value="${esc(v)}" aria-pressed="${selected.includes(v)}">${esc(l)}</button>`).join('')}</div>`;
+}
+
+function healthHtml(h) {
+  const labRows = LAB_FIELDS.map(([k, label, unit]) => `<div class="row">
+        <span class="field-label">${esc(label)}</span>
+        <input type="text" inputmode="decimal" data-role="health-lab" data-lab="${k}" value="${esc(h.labs[k])}" />
+        <span class="field-unit">${esc(unit)}</span>
+      </div>`).join('');
+  return `<div class="section">
+    <button type="button" class="health-toggle" data-role="health-toggle" aria-expanded="${healthOpen}" aria-controls="health-panel">
+      <span>Health (optional, helps the AI coach)</span><span class="rv-chev" aria-hidden="true">›</span>
+    </button>
+    <div id="health-panel" class="health-panel"${healthOpen ? '' : ' hidden'}>
+      <div class="group">
+        <div class="row health-block"><div class="row-label"><div class="field-label">Conditions</div>${healthChipsHtml('conditions', CONDITIONS, h.conditions)}</div></div>
+        <div class="row health-block"><div class="row-label"><div class="field-label">Medicine groups</div>${healthChipsHtml('meds_flags', MEDS_FLAGS, h.meds_flags)}</div></div>
+        <div class="row">
+          <span class="field-label">Sensitivities</span>
+          <input type="text" data-role="health-sensitivities" value="${esc(h.sensitivities)}" placeholder="e.g. dairy, gluten" />
+        </div>
+        <div class="row">
+          <span class="field-label">Medicines</span>
+          <input type="text" data-role="health-meds" value="${esc(h.meds)}" placeholder="Optional" />
+        </div>
+        <div class="row">
+          <span class="field-label">Waist at the navel</span>
+          <input type="text" inputmode="decimal" data-role="health-waist" value="${esc(h.waistCm)}" />
+          <span class="field-unit">cm</span>
+        </div>
+      </div>
+      <p class="section-footer">Measure once a month. Waist is the best sign of belly fat.</p>
+      <div class="group">
+        ${labRows}
+        <div class="row">
+          <span class="field-label">Lab date</span>
+          <input type="date" data-role="health-lab-date" value="${esc(h.labs.date)}" />
+        </div>
+      </div>
+      <p class="section-footer">Lab values are optional. Leave out any you don't have.</p>
+      <div class="group">
+        <div class="row">
+          <span class="row-label">Share health info with the AI coach</span>
+          <input type="checkbox" class="switch" data-role="health-share" aria-label="Share health info with the AI coach" ${h.shareWithAi ? 'checked' : ''} />
+        </div>
+      </div>
+      <p class="section-footer">Off by default. When on, your conditions, medicines, waist and labs are sent to Google Gemini with the weight review, using your own API key. On Google's free tier, Google may use this data to improve its models. It is never sent otherwise.</p>
+    </div>
+  </div>`;
+}
+
 function profileHtml(draft, challenge) {
   if (draft.category !== 'fitness') return '';
   const p = draft.profile;
@@ -658,6 +722,7 @@ function profileHtml(draft, challenge) {
     <p class="section-footer">Targets use your weight goal and the number of Days. After changing either, tap Recalculate.</p>
     ${draft.daysNote ? `<p class="section-footer">${esc(draft.daysNote)}</p>` : ''}
   </div>
+  ${healthHtml(p.health)}
   <div class="section">
     <h2 class="section-header">Meal schedule</h2>
     <div class="group">${scheduleHtml(p.schedule)}</div>
@@ -855,6 +920,13 @@ function wireFormDelegation(root) {
     else if (role === 'profile-location') formDraft.profile.location = e.target.value;
     else if (role === 'profile-cuisine') formDraft.profile.cuisine = e.target.value;
     else if (role === 'profile-avoid') formDraft.profile.avoid = e.target.value;
+    else if (role === 'health-sensitivities') formDraft.profile.health.sensitivities = e.target.value;
+    else if (role === 'health-meds') formDraft.profile.health.meds = e.target.value;
+    else if (role === 'health-waist') {
+      formDraft.profile.health.waistCm = e.target.value;
+      formDraft.profile.health.waistDate = store.today(); // re-measured today
+    } else if (role === 'health-lab') formDraft.profile.health.labs[e.target.dataset.lab] = e.target.value;
+    else if (role === 'health-lab-date') formDraft.profile.health.labs.date = e.target.value;
   });
 
   root.addEventListener('change', (e) => {
@@ -909,6 +981,8 @@ function wireFormDelegation(root) {
       const idx = parseInt(e.target.dataset.index, 10);
       const slot = formDraft.profile.schedule.slots[idx];
       if (slot) slot.time = e.target.value;
+    } else if (role === 'health-share') {
+      formDraft.profile.health.shareWithAi = e.target.checked;
     } else if (role === 'profile-share-photo') {
       formDraft.profile.shareBodyPhoto = e.target.checked;
       current.rerender(); // toggling it changes the body check card's Update enablement
@@ -917,6 +991,25 @@ function wireFormDelegation(root) {
 
   root.addEventListener('click', (e) => {
     if (!current || !formDraft) return;
+
+    const healthToggle = e.target.closest('[data-role="health-toggle"]');
+    if (healthToggle) {
+      healthOpen = healthToggle.getAttribute('aria-expanded') !== 'true';
+      healthToggle.setAttribute('aria-expanded', String(healthOpen));
+      const panel = document.getElementById('health-panel');
+      if (panel) panel.hidden = !healthOpen;
+      return;
+    }
+    const healthChip = e.target.closest('[data-role="health-chip"]');
+    if (healthChip) {
+      const list = formDraft.profile.health[healthChip.dataset.group];
+      if (Array.isArray(list)) {
+        const i = list.indexOf(healthChip.dataset.value);
+        if (i >= 0) list.splice(i, 1); else list.push(healthChip.dataset.value);
+        healthChip.setAttribute('aria-pressed', String(i < 0));
+      }
+      return;
+    }
 
     if (e.target.closest('[data-role="body-check-update"]')) {
       handleBodyCheckUpdate();

@@ -113,7 +113,11 @@ function mockWeight(i) {
   return +(129 + NOISE[i % NOISE.length] + bump).toFixed(1);
 }
 
-async function fitnessEntries(todayStr) {
+// The "Mock fitness" challenge, its attempt and its 21 days — no DOM, so
+// tests/coach.test.js can build the same data. Meal and body photos are only
+// referenced by id here; `photoJobs` lists the fake images fitnessEntries
+// then renders.
+export function fitnessMockData(todayStr) {
   const start = addDays(todayStr, -(FIT_DAYS - 1));
   const profile = {
     sex: 'male', age: 32, heightCm: 180, startWeightKg: 129.5, targetWeightKg: 116.5,
@@ -146,6 +150,7 @@ async function fitnessEntries(todayStr) {
     { store: 'challenges', value: challenge },
     { store: 'attempts', value: { id: FIT, challengeId: FIT, startDate: start, status: 'active', greenWeeks: 0 } },
   ];
+  const photoJobs = [];
   for (let i = 0; i < FIT_DAYS; i++) {
     const date = addDays(start, i);
     const isToday = i === FIT_DAYS - 1;
@@ -156,7 +161,7 @@ async function fitnessEntries(todayStr) {
     for (let m = 0; m < (isToday ? 2 : 3); m++) {
       const base = planned[m];
       const photoId = `photo-mock-fit-${i}-${m}`;
-      entries.push({ store: 'photos', value: { id: photoId, blob: await fakePhoto(base.dish, 20 + m * 40), createdAt: Date.now() } });
+      photoJobs.push({ id: photoId, label: base.dish, hue: 20 + m * 40 });
       meals.push({ id: `meal-mock-${i}-${m}`, photoId, dish: base.dish, calories: base.calories, macros: base.macros, items: [], at: atLocal(date, base.time[0], base.time[1]) });
     }
     daySteps.food = buildFoodPatch({}, meals);
@@ -177,10 +182,18 @@ async function fitnessEntries(todayStr) {
     daySteps.body = { value: mockWeight(i), done: true };
     if (i % 3 === 0) {
       const bodyId = `photo-mock-fit-body-${i}`;
-      entries.push({ store: 'photos', value: { id: bodyId, blob: await fakePhoto(`Body · Day ${i + 1}`, 300), createdAt: Date.now() } });
+      photoJobs.push({ id: bodyId, label: `Body · Day ${i + 1}`, hue: 300 });
       daySteps.body.photoId = bodyId;
     }
     entries.push({ store: 'days', value: { key: dayKey(FIT, date), challengeId: FIT, date, mandatoryStepIds: mandatory, targets, steps: daySteps } });
+  }
+  return { entries, photoJobs, challenge, startDate: start };
+}
+
+async function fitnessEntries(todayStr) {
+  const { entries, photoJobs } = fitnessMockData(todayStr);
+  for (const job of photoJobs) {
+    entries.push({ store: 'photos', value: { id: job.id, blob: await fakePhoto(job.label, job.hue), createdAt: Date.now() } });
   }
   return entries;
 }

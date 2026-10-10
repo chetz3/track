@@ -7,6 +7,7 @@
 
 import { parseCalorieResult } from './foodLogic.js';
 import { parseMealPlan, planTotals, kcalWarning, eatingWindow } from './mealPlan.js';
+import { REVIEW_SCHEMA, reviewPrompt, parseReview } from './coach.js';
 
 // Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
 export const GEMINI_KEY_RE = /^[A-Za-z0-9._-]{20,}$/;
@@ -201,6 +202,17 @@ export async function estimateCalories(blob, note) {
   return parseCalorieResult(parsed);
 }
 
+// Dev-only: prompt size, so the token budget can be watched in the console
+// (about 4 characters per token). Never logs on the live site.
+function logPromptSize(label, text) {
+  try {
+    const h = location.hostname;
+    if (h === 'localhost' || h === '127.0.0.1' || /^192\.168\.|^10\./.test(h)) {
+      console.log(`[gemini] ${label} prompt: ${text.length} chars ≈ ${Math.round(text.length / 4)} tokens`);
+    }
+  } catch (_) { /* no location */ }
+}
+
 // ---------- meal suggestions (docs §2, §4, §5) ----------
 
 const SUGGEST_SCHEMA = {
@@ -310,6 +322,7 @@ export async function suggestMeals(input, avoidDishes, forDay) {
   }
   if (!parsed) {
     const parts = [{ text: suggestPrompt(input, avoidDishes, forDay) }];
+    logPromptSize('suggest', parts[0].text);
     parsed = await callGemini(parts, SUGGEST_SCHEMA, { offlineMessage: "You're offline. Connect to get meal suggestions." });
   }
   const plan = parseMealPlan(parsed);
@@ -384,4 +397,31 @@ export async function checkBody(photoBlob, profile) {
   ];
   const parsed = await callGemini(parts, BODY_SCHEMA, { offlineMessage: "You're offline. Connect to update your body check." });
   return parseBodyCheck(parsed, fallbackBmi);
+}
+
+// ---------- plateau review (plateau-coach plan §5) ----------
+
+// Asks Gemini why the weight isn't moving. `input` is js/coach.js's
+// buildReviewInput() output (already fitted to the budget); `ctx` is
+// reviewContext(input). The answer goes through parseReview, which enforces
+// the safety and no-hallucination rules in code. Mirrors suggestMeals: with
+// localStorage 'tracker:mockGemini' === '1' on a dev host it returns a canned
+// answer (js/dev/mockReview.js) built from the input itself.
+export async function reviewPlateau(input, ctx) {
+  let parsed = null;
+  let mockOn = false;
+  try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
+  const text = reviewPrompt(input);
+  logPromptSize('review', text);
+  if (mockOn) {
+    const { isDevHost } = await import('./dev/mock.js');
+    if (isDevHost()) parsed = await (await import('./dev/mockReview.js')).mockReview(input);
+  }
+  if (!parsed) {
+    parsed = await callGemini([{ text }], REVIEW_SCHEMA, {
+      temperature: 0.4,
+      offlineMessage: "You're offline. Connect to run the weight review.",
+    });
+  }
+  return parseReview(parsed, ctx);
 }

@@ -185,3 +185,18 @@ test('validateV2: a food step with macro targets passes; an invalid one is rejec
   const badDir = { ...stepWithMacros, macros: { protein: { target: 10, dir: 'sideways' } } };
   assert.throws(() => validateV2(backup([badDir])), /Invalid backup file/);
 });
+
+// --- feel tags survive meal add/delete (R2) ---
+
+test('feel survives meal add and delete (buildFoodPatch never carries it, applyStepPatch merges)', async () => {
+  const { applyStepPatch } = await import('../js/storeLogic.js');
+  const step = makeFoodStep({ id: 'food', name: 'Meals', mandatory: true });
+  const m = { id: 'm1', dish: 'Idli', calories: 300, macros: { protein: 10, carbs: 50, fat: 5, fiber: 3 } };
+  let entry = applyStepPatch(step, undefined, { feel: ['bloated', 'cravings'] });
+  entry = applyStepPatch(step, entry, buildFoodPatch(entry, [m]));
+  assert.deepEqual(entry.feel, ['bloated', 'cravings']);
+  assert.equal(entry.meals.length, 1);
+  entry = applyStepPatch(step, entry, buildFoodPatch(entry, []));
+  assert.deepEqual(entry.feel, ['bloated', 'cravings']);
+  assert.equal(entry.meals.length, 0);
+});

@@ -13,7 +13,9 @@ import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
 import { openSheet } from './sheet.js';
-import { trendStatus, weekCheck, isDietBreakActive } from '../trend.js';
+import { trendStatus, weekCheck, isDietBreakActive, dietBreakState } from '../trend.js';
+import { revertChange } from '../coach.js';
+import { FEEL_TAGS, cleanFeel } from '../health.js';
 import { openReviewEntry } from './reviewSheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
 import { mealTimeLabel, sortMealsByAt, mergeAddToExisting, replaceKeepingLogged } from '../planLogic.js';
@@ -443,6 +445,43 @@ function flexFooterHtml(step, fieldCtx) {
   return `<p class="section-footer">Flex days this week: ${used} of ${FLEX_PER_WEEK} used (up to +${FLEX_KCAL} kcal over target)</p>`;
 }
 
+// "How did your gut / energy feel?" chips under the meal list (editable days
+// only — foodRowsHtml is never reached for a read-only day). Saved on the
+// food entry as `feel`; tapping toggles aria-pressed straight away and saves
+// via store.updateStep (see handleFeelToggle).
+function feelRowHtml(step, entry, meals, fieldCtx) {
+  if (!meals.length) return '';
+  const on = new Set(cleanFeel(entry.feel));
+  const chips = FEEL_TAGS.map(([value, label]) => `<button type="button" class="feel-chip" data-role="feel-chip" data-step-id="${esc(step.id)}" data-feel="${esc(value)}" aria-pressed="${on.has(value)}">${esc(label)}</button>`).join('');
+  return `<div class="row feel-row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <div class="row-label">
+      <div class="item-sub" id="feel-label-${esc(step.id)}">How did your gut / energy feel?</div>
+      <div class="feel-chips" role="group" aria-labelledby="feel-label-${esc(step.id)}">${chips}</div>
+    </div>
+  </div>`;
+}
+
+async function handleFeelToggle(btn) {
+  const ctx = fieldContext(btn);
+  if (!ctx) return;
+  const stepId = btn.dataset.stepId;
+  const tag = btn.dataset.feel;
+  const entry = (store.getDay(ctx.challengeId, ctx.date).steps || {})[stepId] || {};
+  const on = new Set(cleanFeel(entry.feel));
+  if (on.has(tag)) on.delete(tag); else on.add(tag);
+  btn.setAttribute('aria-pressed', String(on.has(tag)));
+  const key = `${ctx.challengeId}:${ctx.date}:${stepId}`;
+  try {
+    await store.updateStep(ctx.challengeId, ctx.date, stepId, { feel: [...on] });
+    photoErrorByKey.delete(key);
+    markSaved(ctx);
+  } catch (err) {
+    console.error('Save failed:', err);
+    photoErrorByKey.set(key, "Couldn't save. Please try again.");
+    rerenderIfCurrent(ctx);
+  }
+}
+
 function foodRowsHtml(step, entry, fieldCtx) {
   const key = `${fieldCtx.challengeId}:${fieldCtx.date}:${step.id}`;
   const meals = Array.isArray(entry.meals) ? entry.meals : [];
@@ -467,7 +506,8 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const errorMessage = photoErrorByKey.get(key);
   const errorHtml = errorMessage ? `<div class="section-footer photo-error">${esc(errorMessage)}</div>` : '';
   const planHtml = mealPlanSectionHtml(step, fieldCtx);
-  return `${mealsHtml}${totalHtml}${macroLinesHtml}${plannedHtml}${addHtml}${planMealBtnHtml}${errorHtml}${planHtml}`;
+  const feelHtml = feelRowHtml(step, entry, meals, fieldCtx);
+  return `${mealsHtml}${totalHtml}${feelHtml}${macroLinesHtml}${plannedHtml}${addHtml}${planMealBtnHtml}${errorHtml}${planHtml}`;
 }
 
 // Water: +0.25 L / +0.5 L quick-add buttons on top of the ordinary number
@@ -1979,6 +2019,23 @@ function wireDelegation(root) {
       if (c) openReviewEntry(c);
       return;
     }
+    const feelBtn = e.target.closest('[data-role="feel-chip"]');
+    if (feelBtn) {
+      handleFeelToggle(feelBtn);
+      return;
+    }
+    const backBtnDb = e.target.closest('[data-role="diet-break-back"]');
+    if (backBtnDb) {
+      const c = store.selected();
+      if (c) {
+        backBtnDb.disabled = true;
+        store.updateChallenge(revertChange(c)).catch((err) => {
+          backBtnDb.disabled = false;
+          alert("Couldn't restore your target: " + err.message);
+        });
+      }
+      return;
+    }
     if (e.target.closest('[data-role="coach-later"]')) {
       try { localStorage.setItem(COACH_DISMISS_KEY, addDays(store.today(), COACH_DISMISS_DAYS)); } catch (_) { /* storage blocked */ }
       if (current) current.rerender();
@@ -2202,12 +2259,29 @@ function coachDismissedUntil() {
   try { return localStorage.getItem(COACH_DISMISS_KEY) || ''; } catch (_) { return ''; }
 }
 
+// Diet-break banner (R2): replaces the coach card from the day the break is
+// applied until the user taps "Back to X kcal".
+function dietBreakBannerHtml(challenge, todayStr) {
+  const st = dietBreakState(challenge, todayStr);
+  if (!st) return '';
+  const n = (v) => Number(v).toLocaleString('en-US');
+  if (st.phase === 'running') {
+    return `<div class="coach-card" role="region" aria-label="Diet break">
+      <p>Diet break: <strong>day ${esc(st.day)} of ${esc(st.of)}</strong> — eating at maintenance (${esc(n(st.kcal))} kcal)</p>
+    </div>`;
+  }
+  return `<div class="coach-card" role="region" aria-label="Diet break">
+    <p>Diet break done.</p>
+    <button type="button" class="btn btn-primary" data-role="diet-break-back">Back to ${esc(n(st.backTo))} kcal</button>
+  </div>`;
+}
+
 // Card above the steps on Today for fitness challenges with a body step:
 // plateau/fluctuating/gaining with >= 70 % adherence, or a stalled week.
 function coachCardHtml(challenge, attempt, todayStr) {
   if (challenge.category !== 'fitness' || !attempt) return '';
   if (!challenge.steps.some((st) => st.type === 'body')) return '';
-  if (isDietBreakActive(challenge)) return '';
+  if (isDietBreakActive(challenge, todayStr) || dietBreakState(challenge, todayStr)) return '';
   if (todayStr < coachDismissedUntil()) return '';
   const daysMap = store.state.days[challenge.id] || {};
   const opts = { startDate: attempt.startDate };
@@ -2299,7 +2373,9 @@ async function renderScreen(root, { date, dayRoute }) {
   </div>`;
 
   const eatingWindowHtml = eatingWindowLineHtml(challenge, date, todayStr);
-  const coachHtml = !dayRoute && date === todayStr ? coachCardHtml(challenge, attempt, todayStr) : '';
+  const coachHtml = !dayRoute && date === todayStr
+    ? (dietBreakBannerHtml(challenge, todayStr) || coachCardHtml(challenge, attempt, todayStr))
+    : '';
 
   const flexOn = store.flexDatesFor(challenge.id).has(date);
   const stepsHtml = challenge.steps.map((step) => {

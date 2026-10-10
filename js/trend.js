@@ -248,6 +248,14 @@ function feelTagsOf(meal) {
   return [];
 }
 
+// entry.feel on the food step (the "how did you feel" chips), as a tag list.
+function dayFeelTags(day, foodId) {
+  const f = day && day.steps && foodId && day.steps[foodId] && day.steps[foodId].feel;
+  return Array.isArray(f) ? [...new Set(f.filter((t) => typeof t === 'string' && t))] : [];
+}
+
+export { dayFeelTags };
+
 function isWeekend(date) {
   const [y, m, d] = date.split('-').map(Number);
   const wd = new Date(y, m - 1, d).getDay();
@@ -278,6 +286,7 @@ export function eatingPatterns(challenge, daysMap, today, opts = {}) {
     const meals = mealsOf(daysMap[d], food.id);
     if (meals.length === 0) continue;
     loggedDates.push(d);
+    const dayFeel = dayFeelTags(daysMap[d], food.id);
     const total = mealsTotal(meals);
     const mac = mealsMacros(meals);
     kcalAll += total; protein += mac.protein; carbs += mac.carbs; fiber += mac.fiber; mealCount += meals.length;
@@ -300,6 +309,17 @@ export function eatingPatterns(challenge, daysMap, today, opts = {}) {
         if (key) t.dishes.set(key, { dish: String(m.dish).trim(), n: (t.dishes.get(key)?.n || 0) + 1 });
         tags.set(tag, t);
       }
+    }
+    // Day-level feel tags (entry.feel): one count per tagged day; the dishes
+    // listed are those eaten that day.
+    for (const tag of dayFeel) {
+      const t = tags.get(tag) || { count: 0, dishes: new Map() };
+      t.count++;
+      for (const m of meals) {
+        const key = normDish(m.dish);
+        if (key) t.dishes.set(key, { dish: String(m.dish).trim(), n: (t.dishes.get(key)?.n || 0) + 1 });
+      }
+      tags.set(tag, t);
     }
   }
 
@@ -356,10 +376,37 @@ export function eatingPatterns(challenge, daysMap, today, opts = {}) {
   return out;
 }
 
-// ---------- hooks for later releases ----------
+// ---------- diet break (R2) ----------
 
-// R2 replaces this with a real check (a running diet break hides the coach
-// card, since the diet-break banner takes its place). Always false in R1.
-export function isDietBreakActive(challenge) { // eslint-disable-line no-unused-vars
-  return false;
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// The applied diet break, if any: plateauReview.applied with action
+// 'diet_break'. `untilDate` is the first day back on the original target.
+export function appliedDietBreak(challenge) {
+  const a = challenge && challenge.plateauReview && challenge.plateauReview.applied;
+  return a && a.action === 'diet_break' && typeof a.untilDate === 'string' ? a : null;
+}
+
+// True while a diet break runs: applied and today <= untilDate. A running
+// break hides the Today coach card (the banner replaces it).
+export function isDietBreakActive(challenge, today = localToday()) {
+  const a = appliedDietBreak(challenge);
+  return !!a && today <= a.untilDate;
+}
+
+// What the Today banner shows: null (no break applied), a running break
+// ({phase:'running', day, of, kcal}) or a finished one waiting for the user
+// to tap "Back to X kcal" ({phase:'done', backTo}). The "done" phase lasts
+// until the target is restored, so the banner never silently disappears.
+export function dietBreakState(challenge, today = localToday()) {
+  const a = appliedDietBreak(challenge);
+  if (!a) return null;
+  if (today < a.untilDate) {
+    const of = Math.max(1, diffDays(a.date, a.untilDate));
+    return { phase: 'running', day: Math.min(of, Math.max(1, diffDays(a.date, today) + 1)), of, kcal: a.to };
+  }
+  return { phase: 'done', backTo: a.from };
 }
