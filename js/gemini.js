@@ -216,11 +216,11 @@ export async function estimateCalories(blob, note) {
 
 // Dev-only: prompt size, so the token budget can be watched in the console
 // (about 4 characters per token). Never logs on the live site.
-function logPromptSize(label, text) {
+function logPromptSize(label, text, extra) {
   try {
     const h = location.hostname;
     if (h === 'localhost' || h === '127.0.0.1' || /^192\.168\.|^10\./.test(h)) {
-      console.log(`[gemini] ${label} prompt: ${text.length} chars ≈ ${Math.round(text.length / 4)} tokens`);
+      console.log(`[gemini] ${label} prompt: ${text.length} chars ≈ ${Math.round(text.length / 4)} tokens${extra ? `; ${extra}` : ''}`);
     }
   } catch (_) { /* no location */ }
 }
@@ -439,18 +439,20 @@ export async function checkBody(photoBlob, profile) {
 // the safety and no-hallucination rules in code. Mirrors suggestMeals: with
 // localStorage 'tracker:mockGemini' === '1' on a dev host it returns a canned
 // answer (js/dev/mockReview.js) built from the input itself.
-export async function reviewPlateau(input, ctx) {
+export async function reviewPlateau(input, ctx, imageBlob = null) {
   let parsed = null;
   let mockOn = false;
   try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
   const text = reviewPrompt(input);
-  logPromptSize('review', text);
+  logPromptSize('review', text, imageBlob ? 'image: 1 tile ≈258 tokens' : '');
   if (mockOn) {
     const { isDevHost } = await import('./dev/mock.js');
     if (isDevHost()) parsed = await (await import('./dev/mockReview.js')).mockReview(input);
   }
   if (!parsed) {
-    parsed = await callGemini([{ text }], REVIEW_SCHEMA, {
+    const parts = [{ text }];
+    if (imageBlob) parts.push({ inlineData: { mimeType: 'image/jpeg', data: await blobToBase64(imageBlob) } });
+    parsed = await callGemini(parts, REVIEW_SCHEMA, {
       temperature: 0.4,
       offlineMessage: "You're offline. Connect to run the weight review.",
     });

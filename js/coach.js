@@ -298,6 +298,9 @@ export function buildReviewInput(challenge, daysMap, today, opts = {}) {
     risk: riskSignals(profile, pat, bc, t14),
   };
   if (!input.risk.length) delete input.risk;
+  if (Array.isArray(opts.photoDates) && opts.photoDates.length) {
+    input.photos = { dates: opts.photoDates.slice(0, 4), note: 'collage 2x2, oldest top-left' };
+  }
   for (const k of Object.keys(input)) if (input[k] === undefined) delete input[k];
   return input;
 }
@@ -329,7 +332,8 @@ Rules:
 6b. maintenance: diet_break only if weeksOnPlan ≥ 8; lower_target only if under-logging is unlikely; otherwise keep or raise_protein.
 7. Safety: kcal never below ${floorKcal}; loss ≤ 1% body weight per week; no supplements, drugs or detox; no longer fasting than their schedule; diabetes → no fasting change without a doctor.
 8. food_changes and new_local_foods: their regional cuisine, sold in ${location}, in season for ${month}. new_local_foods = 6 dishes not in pat.top or d.
-9. Every string ≤ 20 words. summary ≤ 2 sentences.
+9. Every string ≤ 20 words. summary ≤ 2 sentences.${input.photos ? `
+10. Image = body photos (dates in photos.dates, oldest top-left). Compare only the visible belly/waist and face puffiness across dates. Report it in photo_trend. Never diagnose; link to risk signals only as "signs consistent with". If lighting, pose or clothing differ too much to compare, say so.` : ''}
 Data:${JSON.stringify(input)}`;
 }
 
@@ -351,6 +355,7 @@ export const VERDICTS = ['real_plateau', 'water_noise', 'under_logging', 'gainin
 export const MIN_DIET_BREAK_WEEKS = 8;
 export const MAINT_ACTIONS = ['keep', 'lower_target', 'raise_protein', 'diet_break', 'recalc'];
 const CONFIDENCES = ['low', 'medium', 'high'];
+export const PHOTO_BELLY = ['smaller', 'same', 'larger', 'unclear'];
 
 export const REVIEW_SCHEMA = {
   type: 'OBJECT',
@@ -407,6 +412,10 @@ export const REVIEW_SCHEMA = {
     habits: strArr,
     ask_doctor: { type: 'ARRAY', items: { type: 'OBJECT', required: ['test', 'why'], properties: { test: S, why: S } } },
     watch_next: S,
+    photo_trend: {
+      type: 'OBJECT',
+      properties: { belly: { type: 'STRING', enum: PHOTO_BELLY }, note: S },
+    },
   },
 };
 
@@ -606,6 +615,14 @@ export function parseReview(json, ctx = {}) {
     }
   }
 
+  let photo_trend;
+  if (ctx.photosSent && json.photo_trend && typeof json.photo_trend === 'object') {
+    const pt = json.photo_trend;
+    let note = str(pt.note, 160);
+    if (/\byou have\b/i.test(note)) note = '';
+    photo_trend = { belly: PHOTO_BELLY.includes(pt.belly) ? pt.belly : 'unclear', note };
+  }
+
   return {
     summary,
     verdict,
@@ -617,6 +634,7 @@ export function parseReview(json, ctx = {}) {
     habits: strList(json.habits, 160, 4),
     ask_doctor: askDoctor.slice(0, 4),
     watch_next: str(json.watch_next, 200),
+    ...(photo_trend ? { photo_trend } : {}),
   };
 }
 
@@ -648,6 +666,7 @@ export function reviewContext(input) {
     labs: p.health && p.health.labs ? Object.keys(p.health.labs).filter((k) => LAB_KEYS.includes(k)) : [],
     signals: risk.map((r) => r.id),
     redFlag: risk.some((r) => r.id.startsWith('red_')),
+    photosSent: !!input.photos,
     feelOrBumps: !!((pat.feel && Object.keys(pat.feel).length) || (pat.bumps && pat.bumps.length)),
   };
 }
