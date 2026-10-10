@@ -111,7 +111,9 @@ export async function mockReview(input) {
       swap: [{ from: 'Curd rice dinner', to: 'Veg soup with chapati and a boiled egg' }],
     },
     new_local_foods: NEW_FOODS,
-    maintenance: kcal
+    maintenance: kcal && !(input.weeksOnPlan >= 8)
+      ? { action: 'raise_protein', why: 'Protein is far below target; raise it before changing calories.' }
+      : kcal
       ? { action: 'diet_break', new_kcal: Math.round((kcal + 300) / 10) * 10, duration_days: 10, why: 'A short stretch at maintenance can settle water and hunger before you go back to the deficit.' }
       : { action: 'keep', why: 'Keep the current target while you fix the dinners.' },
     habits: ['Weigh in at the same time each morning', 'Dinner before 8 pm', 'Sleep at least 7 hours'],

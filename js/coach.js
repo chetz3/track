@@ -348,6 +348,7 @@ const strArr = { type: 'ARRAY', items: S };
 export const CAUSE_CATEGORIES = ['under_logging', 'water_retention', 'insulin_resistance_signs', 'sensitivity_inflammation',
   'low_protein_fiber', 'meal_timing', 'sleep_stress', 'low_daily_movement', 'metabolic_adaptation', 'condition_or_meds', 'other'];
 export const VERDICTS = ['real_plateau', 'water_noise', 'under_logging', 'gaining', 'losing_fine', 'not_enough_data'];
+export const MIN_DIET_BREAK_WEEKS = 8;
 export const MAINT_ACTIONS = ['keep', 'lower_target', 'raise_protein', 'diet_break', 'recalc'];
 const CONFIDENCES = ['low', 'medium', 'high'];
 
@@ -587,6 +588,9 @@ export function parseReview(json, ctx = {}) {
     if (kcal !== null && current !== null && kcal > current) kcal = current;
     if (kcal === null || (current !== null && kcal >= current)) maintenance.action = 'keep'; // nothing lower to apply
     else maintenance.new_kcal = kcal;
+  } else if (action === 'diet_break' && isNum(ctx.weeksOnPlan) && ctx.weeksOnPlan < MIN_DIET_BREAK_WEEKS) {
+    // Too early for a diet break (prompt rule 6b) — enforced here, not trusted.
+    maintenance.action = 'keep';
   } else if (action === 'diet_break') {
     let kcal = asked === null ? (isNum(ctx.maintenanceKcal) ? ctx.maintenanceKcal : null) : asked;
     if (kcal === null) {
@@ -636,6 +640,7 @@ export function reviewContext(input) {
     bmr: calcProfile ? bmr(calcProfile) : null,
     sex: p.sex,
     currentTargetKcal: input.targets && isNum(input.targets.kcal) ? input.targets.kcal : null,
+    weeksOnPlan: isNum(input.weeksOnPlan) ? input.weeksOnPlan : null,
     maintenanceKcal: calcProfile ? round10(tdee(calcProfile)) : null,
     historyDishes: [...history],
     dates,

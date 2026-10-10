@@ -10,7 +10,7 @@
 //   Fully deterministic: same data on every seed.
 // Never runs on the live site.
 
-import { putMany } from '../db.js';
+import { putMany, deleteChallengeCascade } from '../db.js';
 import { addDays } from '../rules.js';
 import { dayKey } from '../migrate.js';
 import { presetSteps, baseTargets } from '../fitness.js';
@@ -37,6 +37,11 @@ function fakePhoto(label, hue) {
 }
 
 export async function seedMock(todayStr) {
+  // Start clean every time: an older mock (or a reset attempt left over from
+  // one) would otherwise keep its own attempt and days next to the new ones.
+  // Only the two mock challenge ids are touched — never real challenges.
+  await deleteChallengeCascade(ID);
+  await deleteChallengeCascade(FIT);
   const start = addDays(todayStr, -9);
   const challenge = {
     id: ID, name: 'Mock challenge', totalDays: 30, weeklyTarget: 5, createdAt: Date.now(),

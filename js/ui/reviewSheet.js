@@ -10,7 +10,7 @@
 import { openSheet } from './sheet.js';
 import { openAiKeySheet } from './aiKeySheet.js';
 import { esc, loaderHtml } from './dom.js';
-import { getGeminiKey, reviewPlateau } from '../gemini.js';
+import { aiAvailable, reviewPlateau } from '../gemini.js';
 import * as store from '../store.js';
 import { trendStatus } from '../trend.js';
 import {
@@ -47,7 +47,7 @@ function liveChallenge(id) {
 // ---------- entry ----------
 
 export function openReviewEntry(challenge) {
-  if (!getGeminiKey()) {
+  if (!aiAvailable()) {
     openAiKeySheet();
     return;
   }

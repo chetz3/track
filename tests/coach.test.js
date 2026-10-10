@@ -389,9 +389,8 @@ test('mockReview: cites real dates and dishes, so parseReview keeps all of it', 
   assert.equal(parsed.likely_causes.length, raw.likely_causes.length);
   assert.equal(parsed.mistakes.length, raw.mistakes.length);
   assert.equal(parsed.new_local_foods.length, 6);
-  assert.equal(parsed.maintenance.action, 'diet_break');
-  assert.ok(parsed.maintenance.new_kcal >= input.targets.kcal);
-  assert.ok(parsed.maintenance.duration_days >= 7 && parsed.maintenance.duration_days <= 14);
+  assert.equal(parsed.maintenance.action, 'raise_protein');
+  assert.equal("new_kcal" in parsed.maintenance, false); // raise_protein carries no kcal
   assert.ok(parsed.likely_causes.every((c) => c.dates.every((d) => input.d.some((r) => r[0] === d))));
   assert.ok(parsed.ask_doctor.length >= 1);
 });
@@ -536,4 +535,10 @@ test('review input stops at yesterday and carries weeksOnPlan', () => {
   assert.equal(input.d[input.d.length - 1][0], addDays(TODAY, -1));
   assert.equal(input.weeksOnPlan, 2);
   assert.match(reviewPrompt(input), /6b\. maintenance: diet_break only if weeksOnPlan ≥ 8/);
+});
+
+test('parseReview: a diet break before 8 weeks on plan becomes keep', () => {
+  const asked = base({ maintenance: { action: 'diet_break', new_kcal: 2100, duration_days: 10, why: 'x' } });
+  assert.equal(parseReview(asked, { ...CTX, weeksOnPlan: 2 }).maintenance.action, 'keep');
+  assert.equal(parseReview(asked, { ...CTX, weeksOnPlan: 9 }).maintenance.action, 'diet_break');
 });

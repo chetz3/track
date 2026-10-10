@@ -26,6 +26,18 @@ function notifyKeyChange() {
   try { window.dispatchEvent(new Event('fueloop:aikey')); } catch (_) { /* no window */ }
 }
 
+// True when an AI call can run: a saved key, or (dev host only) the
+// ?mock=1 canned-answer mode, so the AI screens can be tested without a key.
+export function aiAvailable() {
+  if (getGeminiKey()) return true;
+  try {
+    return localStorage.getItem('tracker:mockGemini') === '1'
+      && /^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(location.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
 export function setGeminiKey(key) {
   try {
     localStorage.setItem(KEY_STORAGE, key);
