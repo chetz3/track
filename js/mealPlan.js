@@ -9,6 +9,8 @@
 import { addDays } from './rules.js';
 import { mealsTotal, mealsMacros } from './foodLogic.js';
 import { latestBodyWeightKg } from './fitness.js';
+import { normDish } from './dish.js';
+import { reviewIsFresh } from './coach.js';
 
 // ---------- canSuggest ----------
 
@@ -84,11 +86,74 @@ function mealTuples(meals) {
   });
 }
 
+// ---------- R3 additions: variety, dish frequency, coach ----------
+
+export const VARIETY_VALUES = ['familiar', 'balanced', 'explore'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function clockOf(at) {
+  if (!Number.isFinite(at)) return null;
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// [[dish, count]] over the `days` days ending `today` (inclusive), most
+// eaten first (ties: first seen). Dishes are grouped with normDish; the
+// first spelling seen is the display name.
+export function dishFrequency(foodStep, daysMap, today, days = 14) {
+  const byNorm = new Map();
+  if (!foodStep) return [];
+  for (let i = days - 1; i >= 0; i--) {
+    const entry = daysMap && daysMap[addDays(today, -i)] && daysMap[addDays(today, -i)].steps && daysMap[addDays(today, -i)].steps[foodStep.id];
+    for (const m of (entry && Array.isArray(entry.meals) ? entry.meals : [])) {
+      const key = normDish(m && m.dish);
+      if (!key) continue;
+      const cur = byNorm.get(key);
+      if (cur) cur[1] += 1; else byNorm.set(key, [String(m.dish).trim(), 1]);
+    }
+  }
+  return [...byNorm.values()].sort((a, b) => b[1] - a[1]);
+}
+
+// Dish names from challenge.mealPlanHistory (newest plans last), tolerant of
+// junk entries (backups are loosely validated).
+export function recentPlanDishes(history) {
+  const out = [];
+  for (const h of Array.isArray(history) ? history : []) {
+    for (const d of (h && Array.isArray(h.dishes) ? h.dishes : [])) if (typeof d === 'string' && d.trim()) out.push(d.trim());
+  }
+  return out;
+}
+
+// New history array with this plan appended: {date, dishes}, capped at the
+// last 3. Regenerating the same date ("New ideas") replaces that day's entry
+// instead of filling the cap with drafts of one day.
+export function pushPlanHistory(history, forDate, dishes) {
+  const kept = (Array.isArray(history) ? history : []).filter((h) => h && h.date !== forDate);
+  kept.push({ date: forDate, dishes: (dishes || []).filter((d) => typeof d === 'string' && d.trim()) });
+  return kept.slice(-3);
+}
+
+// What a fresh, enabled plateau review feeds into suggestions, else null.
+export function coachFromReview(review, today) {
+  if (!reviewIsFresh(review, today)) return null;
+  const fc = review.food_changes || {};
+  const mistakes = (review.mistakes || []).filter((m) => m && m.what).map((m) => (m.fix ? `${m.what} → ${m.fix}` : m.what));
+  return {
+    mistakes,
+    whats: (review.mistakes || []).filter((m) => m && m.what).map((m) => m.what),
+    food_changes: { add: fc.add || [], reduce: fc.reduce || [], swap: (fc.swap || []).map((x) => `${x.from} → ${x.to}`) },
+    new_local_foods: (review.new_local_foods || []).map((f) => f && f.dish).filter(Boolean),
+    maintenance: review.maintenance && review.maintenance.action ? review.maintenance.action : null,
+    reviewDate: review.date,
+  };
+}
+
 // Builds the whole payload for one meal-suggestion call: the profile,
 // today's food targets, the last 7 days (today inclusive) of meals/workout/
 // steps/water/sleep, and the body check text. `today` is the date the
 // suggestion is being made from (the resulting plan is for the day after).
-export function buildSuggestionInput(challenge, daysMap, today, pref) {
+export function buildSuggestionInput(challenge, daysMap, today, pref, variety) {
   const profile = challenge.profile || {};
   const foodStep = findStep(challenge, 'food');
   const workoutStep = findStep(challenge, 'workout');
@@ -138,9 +203,23 @@ export function buildSuggestionInput(challenge, daysMap, today, pref) {
     }
   }
 
+  const coach = coachFromReview(challenge.plateauReview, today);
+  const [, tm] = String(today).split('-').map(Number);
   return {
     pref: pref || null,
+    month: MONTH_NAMES[(tm || 1) - 1] || '',
+    variety: VARIETY_VALUES.includes(variety) ? variety : 'balanced',
+    dishFrequency: dishFrequency(foodStep, daysMap, today, 14),
+    recentPlans: recentPlanDishes(challenge.mealPlanHistory),
+    coach,
     yesterday: {
+      meals: yMeals.map((m) => {
+        const mac = m.macros || {};
+        const n = (v) => (Number.isFinite(v) ? Math.round(v) : 0);
+        const t = [String(m.dish || ''), n(m.calories), n(mac.protein), n(mac.carbs), n(mac.fat), n(mac.fiber), clockOf(m.at)];
+        while (t.length > 1 && t[t.length - 1] === null) t.pop();
+        return t;
+      }),
       dishes: yMeals.map((m) => m.dish || '').filter(Boolean),
       gaps: dayGaps(yEntry, foodStep, targets ? targets.kcal : null),
     },
@@ -165,6 +244,42 @@ export function buildSuggestionInput(challenge, daysMap, today, pref) {
     last7Days,
     bodyCheck: bodyCheckText(challenge, daysMap),
   };
+}
+
+// ---------- what the suggest prompt actually sends (docs §12.1) ----------
+
+export const SUGGEST_FREQ_ROWS = 20;
+
+// Compact data block for suggestPrompt: {y, gaps, freq, recent, avoid, coach?}.
+// `extraRecent` (the previous plan's dishes on "New ideas") is merged into
+// `recent`. profile is only {cuisine, location, diet}; slots, window and
+// targets are inlined in the prompt rules instead. Does not mutate `input`.
+export function compactSuggestInput(input, extraRecent) {
+  const recent = [];
+  const seen = new Set();
+  for (const d of [...(input.recentPlans || []), ...(Array.isArray(extraRecent) ? extraRecent : [])]) {
+    const k = normDish(d);
+    if (k && !seen.has(k)) { seen.add(k); recent.push(d); }
+  }
+  const p = input.profile || {};
+  const out = {
+    profile: { cuisine: p.cuisine || '', location: p.location || '', diet: p.diet || null },
+    y: (input.yesterday && input.yesterday.meals) || [],
+    gaps: ((input.yesterday && input.yesterday.gaps) || []).filter((g) => g.status !== 'ok').map((g) => [g.key, g.actual, g.target, g.status]),
+    freq: (input.dishFrequency || []).slice(0, SUGGEST_FREQ_ROWS),
+    recent,
+  };
+  if (p.avoid) out.avoid = p.avoid;
+  const c = input.coach;
+  if (c) {
+    const changes = {};
+    const fc = c.food_changes || {};
+    if (fc.add && fc.add.length) changes.add = fc.add;
+    if (fc.reduce && fc.reduce.length) changes.reduce = fc.reduce;
+    if (fc.swap && fc.swap.length) changes.swap = fc.swap;
+    out.coach = { mistakes: c.mistakes, changes, foods: c.new_local_foods };
+  }
+  return out;
 }
 
 // ---------- diet preference (meal suggest v2 §2) ----------
@@ -392,7 +507,8 @@ export function groceryList(meals) {
 // Validates and normalises the JSON Gemini returns for a meal suggestion.
 // Never trusts a network response blindly — same spirit as
 // js/foodLogic.js's parseCalorieResult. Throws on a shape that doesn't match.
-export function parseMealPlan(json) {
+export function parseMealPlan(json, ctx) {
+  const known = ctx && Array.isArray(ctx.known) ? new Set(ctx.known.map(normDish).filter(Boolean)) : null;
   if (!json || typeof json !== 'object' || !Array.isArray(json.meals)) {
     throw new Error('Unexpected response from Gemini');
   }
@@ -411,6 +527,10 @@ export function parseMealPlan(json) {
       fiber: clampInt(m.fiber_g, 500),
       swapFor: typeof m.swap_for === 'string' ? m.swap_for : '',
       ingredients: parseIngredients(m.ingredients),
+      // Recomputed in code against what they eat/were planned, never trusted
+      // from the model. Only set when the caller knows the history.
+      ...(known ? { isNew: !known.has(normDish(m.dish)) } : {}),
+      ...(typeof m.local_note === 'string' && m.local_note.trim() ? { localNote: m.local_note.trim().slice(0, 60) } : {}),
     };
   });
   const strings = (v) => (Array.isArray(v) ? v.filter((s) => typeof s === 'string' && s.trim()).slice(0, 3) : []);

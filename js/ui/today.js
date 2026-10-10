@@ -8,7 +8,7 @@
 import * as store from '../store.js';
 import { FLEX_KCAL, FLEX_PER_WEEK, dayStatus, isEditable, isStepComplete, parseNumberInput, isNumberValue, addDays, diffDays } from '../rules.js';
 import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js';
-import { esc, formatDateLong, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
+import { esc, formatDateLong, formatDateShort, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
 import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
 import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
@@ -19,7 +19,7 @@ import { FEEL_TAGS, cleanFeel } from '../health.js';
 import { openReviewEntry } from './reviewSheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
 import { mealTimeLabel, sortMealsByAt, mergeAddToExisting, replaceKeepingLogged } from '../planLogic.js';
-import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey } from '../mealPlan.js';
+import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey, pushPlanHistory, VARIETY_VALUES } from '../mealPlan.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -1321,7 +1321,7 @@ export async function refreshBodyCheckIfDue(challenge, { force = false } = {}) {
 
 function planFromChallenge(challenge) {
   const plan = challenge.mealPlan;
-  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes || [], have: plan.have || [], pref: plan.pref || null, forDate: plan.forDate } : null;
+  return plan ? { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes || [], have: plan.have || [], pref: plan.pref || null, forDate: plan.forDate, coach: plan.coach || null } : null;
 }
 
 // "1480 / 1500 kcal · P 150 / 155 g …" (docs §1's totals-vs-targets line).
@@ -1353,10 +1353,13 @@ function bodyNoteFrom(bodyCheck) {
 function planMealRowHtml(meal, index, added, dayLabel) {
   const macroLine = macroInlineLine({ protein: meal.protein, carbs: meal.carbs, fat: meal.fat, fiber: meal.fiber });
   const swapHtml = meal.swapFor ? `<div class="item-sub">Swap: ${esc(meal.swapFor)}</div>` : '';
+  const newPill = meal.isNew ? ' <span class="pill pending" style="height:20px;padding:0 8px;font-size:11px;vertical-align:middle">New</span>' : '';
+  const noteHtml = meal.localNote ? `<div class="item-sub">${esc(meal.localNote)}</div>` : '';
   return `<div class="row">
     <div class="row-label">
-      <div>${esc(meal.slot)} · ${esc(meal.dish)}</div>
+      <div>${esc(meal.slot)} · ${esc(meal.dish)}${newPill}</div>
       <div class="item-sub">${esc(meal.portion)} · ${esc(macroLine)}</div>
+      ${noteHtml}
       ${swapHtml}
     </div>
     <span>${esc(meal.kcal)} kcal</span>
@@ -1383,6 +1386,33 @@ function prefPickerHtml(state) {
     `<label><input type="radio" name="meal-pref" value="${esc(o.value)}" data-role="meal-pref" ${state.pref === o.value ? 'checked' : ''}><span>${esc(o.label)}</span></label>`
   ).join('');
   return `<div class="section"><h2 class="section-header">Meal preference</h2><div class="segmented">${inputs}</div></div>`;
+}
+
+// Familiar · Balanced · Explore (R3), remembered in tracker:suggestVariety.
+const VARIETY_LABELS = { familiar: 'Familiar', balanced: 'Balanced', explore: 'Explore' };
+const VARIETY_KEY = 'tracker:suggestVariety';
+function loadVariety() {
+  try {
+    const v = localStorage.getItem(VARIETY_KEY);
+    return VARIETY_VALUES.includes(v) ? v : 'balanced';
+  } catch (_) { return 'balanced'; }
+}
+function saveVariety(v) {
+  try { localStorage.setItem(VARIETY_KEY, v); } catch (_) { /* storage blocked */ }
+}
+function varietyPickerHtml(state) {
+  const inputs = VARIETY_VALUES.map((v) =>
+    `<label><input type="radio" name="meal-variety" value="${v}" data-role="meal-variety" ${state.variety === v ? 'checked' : ''}><span>${VARIETY_LABELS[v]}</span></label>`
+  ).join('');
+  return `<div class="section"><h2 class="section-header">Variety</h2><div class="segmented">${inputs}</div>
+    <p class="section-footer">Familiar sticks to what you eat. Explore brings new local dishes.</p></div>`;
+}
+
+// "Built to fix: …" note shown when the plan used a fresh plateau review.
+function coachNoteHtml(coach) {
+  if (!coach || !Array.isArray(coach.mistakes) || !coach.mistakes.length) return '';
+  const when = /^\d{4}-\d{2}-\d{2}$/.test(coach.reviewDate || '') ? ` (from your ${formatDateShort(coach.reviewDate).replace(/^[^,]+, /, '')} review)` : '';
+  return `<p class="section-footer">Built to fix: ${esc(coach.mistakes.join(', '))}${esc(when)}</p>`;
 }
 
 // "Grocery list for <tomorrow>": rows grouped by category with a "have it"
@@ -1430,6 +1460,7 @@ function addAllAskHtml(state, addAllDisabled, allAdded) {
 function mealPlanBodyHtml(state) {
   if (state.stage === 'pick' && !state.loading) {
     return `${prefPickerHtml(state)}
+      ${varietyPickerHtml(state)}
       <button type="button" class="btn btn-primary" data-role="meal-plan-go">Suggest</button>
       <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Cancel</button>`;
   }
@@ -1447,7 +1478,7 @@ function mealPlanBodyHtml(state) {
   const allAdded = state.meals.length > 0 && state.meals.every((_, i) => state.addedIndices.has(i));
   const addAllDisabled = state.busy || allAdded || state.meals.length === 0;
   const addAllError = state.addError ? `<p class="section-footer error">${esc(state.addError)}</p>` : '';
-  return `<div class="group">${mealsHtml}</div>
+  return `${coachNoteHtml(state.coach)}<div class="group">${mealsHtml}</div>
     ${targetsHtml ? `<p class="section-footer">${esc(targetsHtml)}</p>` : ''}
     ${warningHtml}
     ${state.fixes && state.fixes.length ? linesHtml('Fixes from yesterday', state.fixes) : linesHtml('Why this plan', state.why)}
@@ -1495,6 +1526,8 @@ export function openMealPlanSheet(ctx, opts = {}) {
     stage: opts.generate ? 'pick' : 'plan',
     diet: challenge.profile && challenge.profile.diet,
     pref: startPref,
+    variety: loadVariety(),
+    coach: existing ? existing.coach : null,
     fixes: existing ? existing.fixes : [],
     have: existing ? existing.have : [],
     shareMsg: '',
@@ -1546,11 +1579,15 @@ export function openMealPlanSheet(ctx, opts = {}) {
       await refreshBodyCheckIfDue(challenge).catch((err) => console.error('Body check failed:', err));
       const freshChallenge = store.state.challenges.find((c) => c.id === ctx.challengeId) || challenge;
       const freshDaysMap = store.state.days[ctx.challengeId] || {};
-      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date, state.pref);
+      const freshInput = buildSuggestionInput(freshChallenge, freshDaysMap, ctx.date, state.pref, state.variety);
       const result = await suggestMeals(freshInput, avoidDishes, state.dayLabel ? `${state.dayLabel} (${state.forDate})` : undefined);
+      const usedCoach = freshInput.coach && freshInput.coach.whats.length
+        ? { mistakes: freshInput.coach.whats, reviewDate: freshInput.coach.reviewDate } : null;
       await store.patchChallenge(ctx.challengeId, {
-        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips, fixes: result.fixes, pref: state.pref, have: [] },
+        mealPlan: { forDate: state.forDate, createdAt: Date.now(), meals: result.meals, why: result.why, tips: result.tips, fixes: result.fixes, pref: state.pref, have: [], ...(usedCoach ? { coach: usedCoach } : {}) },
+        mealPlanHistory: pushPlanHistory(freshChallenge.mealPlanHistory, state.forDate, result.meals.map((m) => m.dish)),
       });
+      state.coach = usedCoach;
       state.meals = result.meals;
       state.why = result.why;
       state.tips = result.tips;
@@ -1702,6 +1739,12 @@ export function openMealPlanSheet(ctx, opts = {}) {
       const prefInput = e.target.closest('[data-role="meal-pref"]');
       if (prefInput) {
         state.pref = prefInput.value;
+        return;
+      }
+      const varietyInput = e.target.closest('[data-role="meal-variety"]');
+      if (varietyInput) {
+        state.variety = varietyInput.value;
+        saveVariety(state.variety);
         return;
       }
       const haveInput = e.target.closest('[data-role="grocery-have"]');

@@ -418,3 +418,146 @@ test('buildSuggestionInput: yesterday gaps/dishes and recentDishes', () => {
   assert.ok(input.yesterday.gaps.find((g) => g.key === 'protein' && g.status === 'short'));
   assert.deepEqual(input.recentDishes, ['Idli', 'Dosa']);
 });
+
+// ---------- R3: variety, frequency, coach, compact prompt ----------
+
+import { compactSuggestInput, dishFrequency, pushPlanHistory, recentPlanDishes } from '../js/mealPlan.js';
+import { suggestPrompt, SUGGEST_BUDGET_CHARS } from '../js/gemini.js';
+import { fitnessMockData } from '../js/dev/mock.js';
+import { mockSuggest } from '../js/dev/mockSuggest.js';
+
+const R3_TODAY = '2026-10-10';
+function mockCh(extra = {}) {
+  const m = fitnessMockData(R3_TODAY);
+  const days = {};
+  for (const e of m.entries) if (e.store === 'days') days[e.value.date] = e.value;
+  return { challenge: { ...m.challenge, ...extra }, days };
+}
+const REVIEW = {
+  date: '2026-10-05', useInSuggestions: true,
+  mistakes: [{ what: 'Late rice dinners', fix: 'Dinner before 8 pm, half the rice' }, { what: 'Low protein', fix: 'Add egg or dal at breakfast' }],
+  food_changes: { add: ['moong dal'], reduce: ['white rice'], swap: [{ from: 'curd rice', to: 'buttermilk' }] },
+  new_local_foods: [{ dish: 'Kollu saaru' }], maintenance: { action: 'keep' },
+};
+
+test('buildSuggestionInput: R3 fields (month, variety, frequency, recentPlans) keep the old ones', () => {
+  const { challenge, days } = mockCh({ mealPlanHistory: [{ date: '2026-10-09', dishes: ['Ragi mudde'] }] });
+  const input = buildSuggestionInput(challenge, days, R3_TODAY, 'mix', 'explore');
+  assert.equal(input.month, 'October');
+  assert.equal(input.variety, 'explore');
+  assert.equal(buildSuggestionInput(challenge, days, R3_TODAY, 'mix').variety, 'balanced');
+  assert.equal(buildSuggestionInput(challenge, days, R3_TODAY, 'mix', 'nope').variety, 'balanced');
+  assert.deepEqual(input.recentPlans, ['Ragi mudde']);
+  assert.ok(input.dishFrequency.length > 0 && input.dishFrequency[0][1] >= input.dishFrequency[input.dishFrequency.length - 1][1]);
+  assert.ok(input.last7Days && input.recentDishes && input.yesterday.dishes && input.targets); // old fields
+});
+
+test('dishFrequency groups by normDish over 14 days', () => {
+  const challenge = fitnessChallenge();
+  const fid = challenge.steps.find((s) => s.type === 'food').id;
+  const daysMap = {
+    [TODAY]: dayWithMeals(TODAY, fid, [meal('Masala Dosa', 300), meal('Idlis', 100)]),
+    [addDays(TODAY, -3)]: dayWithMeals(addDays(TODAY, -3), fid, [meal('masala dosas', 300), meal('Idli', 100)]),
+    [addDays(TODAY, -20)]: dayWithMeals(addDays(TODAY, -20), fid, [meal('Old dish', 100)]),
+  };
+  const f = dishFrequency(challenge.steps.find((s) => s.type === 'food'), daysMap, TODAY, 14);
+  assert.deepEqual(f, [['masala dosas', 2], ['Idli', 2]]);
+});
+
+test('coach is set only when the review is fresh and enabled', () => {
+  const at = (extra) => { const { challenge, days } = mockCh(extra); return buildSuggestionInput(challenge, days, R3_TODAY, 'mix').coach; };
+  assert.equal(at({}), null);
+  const c = at({ plateauReview: REVIEW });
+  assert.deepEqual(c.mistakes, ['Late rice dinners → Dinner before 8 pm, half the rice', 'Low protein → Add egg or dal at breakfast']);
+  assert.deepEqual(c.new_local_foods, ['Kollu saaru']);
+  assert.equal(c.maintenance, 'keep');
+  assert.equal(c.reviewDate, '2026-10-05');
+  assert.equal(at({ plateauReview: { ...REVIEW, useInSuggestions: false } }), null);
+  assert.equal(at({ plateauReview: { ...REVIEW, date: '2026-09-01' } }), null); // 39 days old
+});
+
+test('pushPlanHistory caps at 3, newest last, same date replaced', () => {
+  let h = [];
+  for (const d of ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04']) h = pushPlanHistory(h, d, ['A ' + d]);
+  assert.deepEqual(h.map((x) => x.date), ['2026-10-02', '2026-10-03', '2026-10-04']);
+  h = pushPlanHistory(h, '2026-10-04', ['B']);
+  assert.equal(h.length, 3);
+  assert.deepEqual(h[2], { date: '2026-10-04', dishes: ['B'] });
+  assert.deepEqual(recentPlanDishes([{ dishes: ['x', 5] }, null, { dishes: 'no' }]), ['x']);
+});
+
+test('parseMealPlan: is_new recomputed in code, local_note kept (<= 60), old plans still parse', () => {
+  const json = { meals: [
+    { slot: 'Lunch', dish: 'Masala Dosas', portion: '2', kcal: 300, protein_g: 5, carbs_g: 5, fat_g: 5, fiber_g: 5, is_new: true, local_note: 'x'.repeat(100) },
+    { slot: 'Dinner', dish: 'Kollu saaru', portion: '1', kcal: 300, protein_g: 5, carbs_g: 5, fat_g: 5, fiber_g: 5, is_new: false },
+  ] };
+  const p = parseMealPlan(json, { known: ['masala dosa'] });
+  assert.equal(p.meals[0].isNew, false); // model said true; code says known
+  assert.equal(p.meals[1].isNew, true); // model said false; code says new
+  assert.equal(p.meals[0].localNote.length, 60);
+  assert.equal('localNote' in p.meals[1], false);
+  const old = parseMealPlan({ meals: [{ slot: 'Lunch', dish: 'Idli', portion: '2', kcal: 1 }] });
+  assert.equal('isNew' in old.meals[0], false);
+  assert.equal('localNote' in old.meals[0], false);
+});
+
+test('compactSuggestInput: shape, merged recent, top-20 freq, no extra profile keys', () => {
+  const { challenge, days } = mockCh({ plateauReview: REVIEW, mealPlanHistory: [{ date: '2026-10-09', dishes: ['Ragi mudde'] }] });
+  const input = buildSuggestionInput(challenge, days, R3_TODAY, 'mix', 'balanced');
+  const c = compactSuggestInput(input, ['ragi muddes', 'New dish']);
+  assert.deepEqual(Object.keys(c.profile), ['cuisine', 'location', 'diet']);
+  assert.deepEqual(c.recent, ['Ragi mudde', 'New dish']);
+  assert.ok(c.freq.length <= 20);
+  assert.ok(c.coach && c.coach.mistakes.length === 2 && c.coach.changes.swap[0] === 'curd rice → buttermilk');
+  assert.equal('coach' in compactSuggestInput({ ...input, coach: null }), false);
+  assert.equal(input.dishFrequency.length >= c.freq.length, true);
+});
+
+test('suggestPrompt: variety rule, no "not novelty", coach rule only when coach present', () => {
+  const { challenge, days } = mockCh();
+  const plain = suggestPrompt(buildSuggestionInput(challenge, days, R3_TODAY, 'mix', 'explore'));
+  assert.equal(/not novelty/i.test(plain), false);
+  assert.match(plain, /3\. Variety explore: every dish not in freq\./);
+  assert.equal(plain.includes('6b.'), false);
+  assert.equal(plain.includes('"coach"'), false);
+  const withCoach = suggestPrompt(buildSuggestionInput({ ...challenge, plateauReview: REVIEW }, days, R3_TODAY, 'mix', 'familiar'));
+  assert.match(withCoach, /6b\. Fix coach\.mistakes/);
+  assert.match(withCoach, /Variety familiar: mostly dishes from freq/);
+  assert.match(withCoach, /"coach":\{/);
+  const off = suggestPrompt(buildSuggestionInput({ ...challenge, plateauReview: { ...REVIEW, useInSuggestions: false } }, days, R3_TODAY, 'mix'));
+  assert.equal(off.includes('6b.'), false);
+  assert.equal(plain.includes('\n  '), false);
+});
+
+test('suggest prompt for the 3-week mock is within the 6,000 char budget (coach on, New ideas)', () => {
+  const { challenge, days } = mockCh({ plateauReview: REVIEW, mealPlanHistory: [{ date: '2026-10-09', dishes: ['A', 'B', 'C'] }] });
+  const prompt = suggestPrompt(buildSuggestionInput(challenge, days, R3_TODAY, 'mix', 'balanced'), ['One', 'Two', 'Three']);
+  assert.ok(prompt.length <= SUGGEST_BUDGET_CHARS, `prompt is ${prompt.length} chars`);
+  if (process.env.SHOW_SUGGEST_PROMPT) console.log(prompt.length + '\n' + prompt);
+});
+
+test('suggestPrompt trims the lowest-count freq rows when over budget', () => {
+  const { challenge, days } = mockCh();
+  const input = buildSuggestionInput(challenge, days, R3_TODAY, 'mix');
+  input.dishFrequency = Array.from({ length: 20 }, (_, i) => ['Dish number ' + i + ' ' + 'z'.repeat(400), 20 - i]);
+  const p = suggestPrompt(input);
+  assert.ok(p.length <= SUGGEST_BUDGET_CHARS);
+  assert.ok(p.includes('Dish number 0 '));
+  assert.equal(p.includes('Dish number 19 '), false);
+});
+
+test('mockSuggest honours variety, returns local_note, stays recognisable South Indian', async () => {
+  const { challenge, days } = mockCh();
+  const base = buildSuggestionInput(challenge, days, R3_TODAY, 'veg', 'explore');
+  base.dishFrequency = [['Pesarattu + coconut chutney', 3], ['Ragi mudde + bassaru + palya', 2], ['Paneer sukka + 2 chapati + curd', 2]];
+  const explore = await mockSuggest(base);
+  assert.ok(explore.meals.every((m) => m.local_note));
+  const known = new Set(base.dishFrequency.map((f) => f[0]));
+  assert.ok(explore.meals.every((m) => !known.has(m.dish)));
+  const fam = await mockSuggest({ ...base, variety: 'familiar' });
+  assert.ok(fam.meals.every((m) => known.has(m.dish)));
+  const bal = await mockSuggest({ ...base, variety: 'balanced' });
+  assert.ok(bal.meals.filter((m) => !known.has(m.dish)).length >= 2);
+  const withCoach = await mockSuggest({ ...base, coach: { mistakes: ['Late dinners → eat early'] } });
+  assert.deepEqual(withCoach.fixes, ['Late dinners → eat early']);
+});

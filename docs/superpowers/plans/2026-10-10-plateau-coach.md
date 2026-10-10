@@ -625,3 +625,16 @@ Data:${minifiedJson}
 - After Sonnet wires each prompt, Opus re-reads the built string from the 3-week mock data.
 - Checks: budget, no leftover verbose text, the legend matches the keys actually sent, and no unused data is sent.
 - Opus then fine-tunes the wording before the user tests with a real key.
+
+### 12.4 Opus review outcome (as built from the 3-week mock)
+
+**Review prompt** (~7.1k chars, ~1.8k tokens):
+- **Floor:** it is now `max(sex floor, min(BMR, current target))`. The old rule said "never below BMR 1939", which contradicted the app's own 1660 target.
+- **Days sent:** today's half-logged day is excluded. The 28 full days now end yesterday.
+- **Diet break:** `weeksOnPlan` was added, and rule 6b allows a diet_break only from 8 weeks on.
+- **Wording:** the prompt adds "write to them as you" and "quote numbers exactly".
+
+**Suggest prompt** (~2k chars, ~500 tokens):
+- **Legend:** it now explains the gaps columns and coach.
+- **Protein/fibre:** these are "push toward … report true values, never inflate" instead of a hard ≥, which stops made-up macros.
+- **Ingredients:** "ingredients = what the dish is really made of".
