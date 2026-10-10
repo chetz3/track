@@ -461,3 +461,10 @@ body { padding: env(safe-area-inset-top) 0 calc(104px + env(safe-area-inset-bott
 .rv-applied { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--green-soft); color: var(--green); font-size: 14px; font-weight: 600; }
 .rv-applied .btn { width: auto; flex: none; }
 @media (prefers-reduced-motion: reduce) { .rv-chev { transition: none; } }
+
+/* body photo trend */
+.body-trend-row { padding: 8px 16px 0; display: flex; flex-direction: column; gap: 4px; }
+.body-trend-row .btn { min-height: 44px; }
+.body-trend-row .section-footer { padding: 0; }
+.bt-collage { display: block; width: 100%; max-width: 384px; aspect-ratio: 1; margin: 0 auto 12px; border-radius: 12px; object-fit: cover; }
+.rv-photos { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; padding: 12px 0; }

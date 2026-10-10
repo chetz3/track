@@ -122,5 +122,6 @@ export async function mockReview(input) {
       { test: 'Liver function test with an ultrasound', why: 'To check for fatty liver.' },
     ],
     watch_next: 'Compare your 14-day trend after two weeks of earlier dinners.',
+    ...(input.photos ? { photo_trend: { belly: 'same', note: 'Belly area looks about the same across 4 weeks.' } } : {}),
   };
 }

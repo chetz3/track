@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tracker-shell-v50';
+const CACHE_NAME = 'tracker-shell-v51';
 const FONTS_CACHE_NAME = 'tracker-fonts-v1';
 const SHELL_FILES = [
   './',
@@ -8,6 +8,7 @@ const SHELL_FILES = [
   './js/rules.js',
   './js/db.js',
   './js/photos.js',
+  './js/photoTrend.js',
   './js/backup.js',
   './js/migrate.js',
   './js/store.js',
@@ -39,6 +40,7 @@ const SHELL_FILES = [
   './js/ui/stepEditor.js',
   './js/ui/aiKeySheet.js',
   './js/ui/reviewSheet.js',
+  './js/ui/collage.js',
   './js/ui/stats.js',
   './js/ui/planner.js',
   './manifest.webmanifest',

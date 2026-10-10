@@ -24,7 +24,8 @@ import { buildPhotoProgress } from '../summaryModel.js';
 import { isFoodStep, mealsTotal, mealsMacros, macroDotLine } from '../foodLogic.js';
 import { addDays } from '../rules.js';
 import { weightSeries, smoothWeights, trendStatus } from '../trend.js';
-import { openReviewEntry } from './reviewSheet.js';
+import { openReviewEntry, openBodyTrend } from './reviewSheet.js';
+import { pickWeeklyBodyPhotos, photoTrendReady } from '../photoTrend.js';
 
 // ---------- resize handling (module-level, registered once) ----------
 
@@ -135,6 +136,12 @@ function wireWeightTrend(root) {
     if (e.target.closest('[data-role="trend-why"]')) {
       const challenge = store.selected();
       if (challenge) openReviewEntry(challenge);
+      return;
+    }
+    const bt = e.target.closest('[data-role="body-trend"]');
+    if (bt && !bt.disabled) {
+      const challenge = store.selected();
+      if (challenge) openBodyTrend(challenge);
     }
   });
 }
@@ -186,6 +193,15 @@ function todayFoodLineHtml(step, daysMap) {
   return `<p class="section-footer">Today · ${esc(mealsTotal(meals))} kcal · ${esc(macroDotLine(mealsMacros(meals)))}</p>`;
 }
 
+function bodyTrendButtonHtml(challenge, daysMap) {
+  if (!challenge.steps.some((st) => st.type === 'body')) return '';
+  const ready = photoTrendReady(pickWeeklyBodyPhotos(challenge, daysMap, store.today()));
+  return `<div class="body-trend-row">
+    <button type="button" class="btn btn-secondary" data-role="body-trend"${ready ? '' : ' disabled'}>Analyse body trend (AI)</button>
+    ${ready ? '' : '<p class="section-footer">Needs 2+ weekly body photos</p>'}
+  </div>`;
+}
+
 // Returns '' (section omitted entirely) when the challenge has no
 // photo-enabled step.
 function photoProgressHtml(challenge, attempt, daysMap) {
@@ -235,6 +251,7 @@ function photoProgressHtml(challenge, attempt, daysMap) {
       </div>
       ${changeHtml}
       ${gridHtml}
+      ${bodyTrendButtonHtml(challenge, daysMap)}
     </div>
   `;
 }

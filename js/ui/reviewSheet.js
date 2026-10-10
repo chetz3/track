@@ -13,6 +13,8 @@ import { esc, loaderHtml } from './dom.js';
 import { aiAvailable, reviewPlateau } from '../gemini.js';
 import * as store from '../store.js';
 import { trendStatus } from '../trend.js';
+import { pickWeeklyBodyPhotos, photoTrendReady } from '../photoTrend.js';
+import { buildBodyCollage } from './collage.js';
 import {
   buildReviewInput, fitReviewInput, reviewContext, newReviewRecord, rerunInfo, shouldShowExisting,
   applyChange, revertChange, foodStepOf, proteinRaiseTarget,
@@ -66,13 +68,81 @@ export function openReviewEntry(challenge) {
   });
 }
 
+// ---------- body photo trend ----------
+
+function photosAllowed(c) {
+  const days = store.state.days[c.id] || {};
+  return !!(c.profile && c.profile.shareBodyPhoto === true)
+    && photoTrendReady(pickWeeklyBodyPhotos(c, days, store.today()));
+}
+
+// Stats -> "Analyse body trend (AI)". Photos leave the device only when
+// profile.shareBodyPhoto is on AND the person taps Analyse on the preview.
+export function openBodyTrend(challenge) {
+  if (!aiAvailable()) {
+    openAiKeySheet();
+    return;
+  }
+  const id = challenge.id;
+  const c = liveChallenge(id) || challenge;
+
+  if (!(c.profile && c.profile.shareBodyPhoto === true)) {
+    openSheet({
+      title: 'Body photo trend',
+      bodyHtml: `<div id="review-root">
+        <p>Turn on 'Share body photo' in the challenge profile to include photos.</p>
+        <a class="btn btn-secondary" href="#/challenges/${esc(id)}" data-role="rv-profile">Open profile</a>
+        <button type="button" class="btn btn-primary" data-role="bt-text">Run review without photos</button>
+        <button type="button" class="btn btn-secondary" data-role="rv-close">Cancel</button>
+      </div>`,
+      onMount: (sheet, close) => {
+        const root = sheet.querySelector('#review-root');
+        wire(root, id, close);
+        root.addEventListener('click', (e) => {
+          if (e.target.closest('[data-role="bt-text"]')) run(root, id);
+        });
+      },
+    });
+    return;
+  }
+
+  const picks = pickWeeklyBodyPhotos(c, store.state.days[id] || {}, store.today());
+  if (!photoTrendReady(picks)) return;
+  const photoCtx = { picks, blob: null };
+  let url = null;
+  let closed = false;
+  openSheet({
+    title: 'Body photo trend',
+    bodyHtml: `<div id="review-root">${loaderHtml('Building collage…', 'lg')}</div>`,
+    onClose: () => {
+      closed = true;
+      if (url) { URL.revokeObjectURL(url); url = null; }
+    },
+    onMount: (sheet, close) => {
+      const root = sheet.querySelector('#review-root');
+      wire(root, id, close, photoCtx);
+      buildBodyCollage(picks).then((blob) => {
+        if (closed || !root.isConnected) return;
+        photoCtx.blob = blob;
+        url = URL.createObjectURL(blob);
+        root.innerHTML = `<img class="bt-collage" src="${url}" alt="Your weekly body photos in one image" />
+          <p class="section-footer">This 1 image goes to Google Gemini on your own key, with your last 28 days of data. Nothing is stored.</p>
+          <div class="btn-pair">
+            <button type="button" class="btn btn-primary" data-role="bt-analyse">Analyse</button>
+            <button type="button" class="btn btn-secondary" data-role="bt-cancel">Cancel</button>
+          </div>`;
+      }).catch((err) => { if (root.isConnected) renderError(root, err); });
+    },
+  });
+}
+
 // ---------- run ----------
 
-function run(root, id) {
+function run(root, id, photos = null) {
   root.innerHTML = loaderHtml('Reviewing your last 28 days…', 'lg');
   let p = inflight.get(id);
   if (!p) {
-    p = runReview(id);
+    p = runReview(id, photos);
     inflight.set(id, p);
     p.then(() => inflight.delete(id), () => inflight.delete(id));
   }
@@ -80,15 +150,22 @@ function run(root, id) {
     .catch((err) => { if (root.isConnected) renderError(root, err); });
 }
 
-async function runReview(id) {
+// photos: null (text only) or { picks, blob } — the collage built and
+// confirmed on the preview sheet. It is sent once and never stored.
+async function runReview(id, photos = null) {
   const c = liveChallenge(id);
   if (!c) throw new Error('Challenge not found.');
   const daysMap = store.state.days[id] || {};
   const attempt = store.displayAttempt(id);
   const today = store.today();
   const opts = { startDate: attempt ? attempt.startDate : undefined };
+  if (photos && photos.blob && c.profile && c.profile.shareBodyPhoto === true) {
+    opts.photoDates = photos.picks.map((p) => p.date);
+  } else {
+    photos = null;
+  }
   const input = fitReviewInput(buildReviewInput(c, daysMap, today, opts));
-  const parsed = await reviewPlateau(input, reviewContext(input));
+  const parsed = await reviewPlateau(input, reviewContext(input), photos ? photos.blob : null);
   const trend = trendStatus(c, daysMap, today, { ...opts, windowDays: 14 });
   const prior = (liveChallenge(id) || c).plateauReview;
   const record = newReviewRecord(parsed, today, trend, prior && prior.applied ? prior.applied : null);
@@ -180,6 +257,24 @@ function section(id, title, bodyHtml, open) {
   </section>`;
 }
 
+const BELLY = {
+  smaller: ['Smaller', 'green'],
+  same: ['Same', 'pending'],
+  larger: ['Larger', 'red'],
+  unclear: ['Unclear', 'future'],
+};
+
+function photoTrendHtml(r) {
+  const pt = r.photo_trend;
+  if (!pt) return '';
+  const [label, cls] = BELLY[pt.belly] || BELLY.unclear;
+  return `<div class="rv-photos">
+      <p class="rv-label">What the photos show</p>
+      <p><span class="pill ${esc(cls)}">Belly: ${esc(label)}</span></p>
+      ${pt.note ? `<p class="rv-sub">${esc(pt.note)}</p>` : ''}
+    </div>`;
+}
+
 export function reviewHtml(c, r, rerun) {
   const [verdictLabel, verdictClass] = VERDICTS[r.verdict] || VERDICTS.not_enough_data;
   const secs = [];
@@ -222,6 +317,7 @@ export function reviewHtml(c, r, rerun) {
       ${trendLine(r.trendAtReview)}
       <p class="rv-sub">Reviewed ${esc(dm(r.date))}</p>
     </div>
+    ${photoTrendHtml(r)}
     <div class="rv-secs">${secs.map(([id, title, html], i) => section(id, title, html, i < 2)).join('')}</div>
     <div class="group"><div class="row">
       <span class="row-label">Use in meal suggestions</span>
@@ -309,7 +405,7 @@ async function doUndo(root, id, btn) {
   }
 }
 
-function wire(root, id, close) {
+function wire(root, id, close, photoCtx = null) {
   root.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-role]');
     if (!btn || !root.contains(btn)) return;
@@ -326,7 +422,15 @@ function wire(root, id, close) {
     } else if (role === 'rv-retry') {
       run(root, id);
     } else if (role === 'rv-rerun') {
-      if (!btn.disabled) run(root, id);
+      if (btn.disabled) return;
+      const c = liveChallenge(id);
+      // The last run used photos: ask again on the preview (nothing is sent without it).
+      if (c && c.plateauReview && c.plateauReview.photo_trend && photosAllowed(c)) openBodyTrend(c);
+      else run(root, id);
+    } else if (role === 'bt-analyse') {
+      if (photoCtx && photoCtx.blob) run(root, id, { picks: photoCtx.picks, blob: photoCtx.blob });
+    } else if (role === 'bt-cancel') {
+      close();
     } else if (role === 'rv-apply') {
       doApply(root, id, btn);
     } else if (role === 'rv-undo') {
