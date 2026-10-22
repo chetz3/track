@@ -63,6 +63,9 @@ const endpoint = (model) => `https://generativelanguage.googleapis.com/v1beta/mo
 // 429 too: each model has its own free-tier quota, so Lite can still answer
 // when Flash's per-minute limit is used up.
 const RETRYABLE = new Set([404, 429, 500, 503]);
+// Every answer here is an approximate estimate, so speed beats depth: the
+// model is told to answer at once and thinking is switched off.
+const FAST_INSTRUCTION = 'Answer immediately with your best estimate. Approximate values are fine — do not deliberate, double-check or explain. Keep every string short.';
 
 const PROMPT = `You are a nutrition estimator. Estimate the calories of the food in this photo.
 - List each distinct food or drink with its visible portion (use plates, cutlery, hands for scale).
@@ -159,15 +162,20 @@ async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "
   if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
   if (!navigator.onLine) throw new Error(offlineMessage);
 
-  const body = JSON.stringify({
+  const makeBody = (noThinking) => JSON.stringify({
+    systemInstruction: { parts: [{ text: FAST_INSTRUCTION }] },
     contents: [{ parts }],
-    generationConfig: { temperature, responseMimeType: 'application/json', responseSchema: schema },
+    generationConfig: {
+      temperature,
+      responseMimeType: 'application/json',
+      responseSchema: schema,
+      ...(noThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+    },
   });
 
-  let res;
-  for (const model of MODELS) {
+  const send = async (model, body) => {
     try {
-      res = await fetch(endpoint(model), {
+      return await fetch(endpoint(model), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body,
@@ -177,11 +185,27 @@ async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "
       // connection reset) — navigator.onLine already caught the common case.
       throw new Error(offlineMessage);
     }
+  };
+
+  let res;
+  let errText = null;
+  for (const model of MODELS) {
+    errText = null;
+    res = await send(model, makeBody(true));
+    if (res.status === 400) {
+      // A model that can't turn thinking off rejects thinkingConfig; resend
+      // once without it. res.text() consumes the body, so keep it for below.
+      errText = await res.text().catch(() => '');
+      if (/thinking/i.test(errText)) {
+        errText = null;
+        res = await send(model, makeBody(false));
+      }
+    }
     if (res.ok || !RETRYABLE.has(res.status)) break;
   }
 
   if (!res.ok) {
-    const bodyText = await res.text().catch(() => '');
+    const bodyText = errText ?? await res.text().catch(() => '');
     if (res.status === 503) throw new Error('Gemini is busy right now. Try again in a minute.');
     throw new Error(friendlyError(res.status, bodyText));
   }
