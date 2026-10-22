@@ -43,12 +43,13 @@ const blob = () => new Blob(['x'], { type: 'image/jpeg' });
 
 beforeEach(() => { calls = []; });
 
-test('first request disables thinking and sets a fast instruction', async () => {
+test('first request goes to Flash-Lite with minimal thinking and a fast instruction', async () => {
   stubFetch([okRes()]);
   const r = await checkBody(blob(), {});
   assert.equal(calls.length, 1);
   const b = calls[0].body;
-  assert.equal(b.generationConfig.thinkingConfig.thinkingBudget, 0);
+  assert.ok(calls[0].url.includes('gemini-3.5-flash-lite'));
+  assert.deepEqual(b.generationConfig.thinkingConfig, { thinkingLevel: 'minimal' });
   assert.ok(b.systemInstruction.parts[0].text.length > 0);
   assert.ok(b.generationConfig.responseSchema);
   assert.equal(r.build, 'average');
@@ -69,11 +70,25 @@ test('other 400 is not resent and keeps its friendly message', async () => {
   assert.equal(calls.length, 1);
 });
 
-test('503 on first model falls back to the lite model', async () => {
+test('503 on first model falls back to the next model', async () => {
   stubFetch([errRes(503, ''), okRes()]);
   await checkBody(blob(), {});
   assert.equal(calls.length, 2);
-  assert.ok(calls[1].url.includes('flash-lite'));
+  assert.ok(calls[1].url.includes('gemini-3.6-flash'));
+});
+
+test('a 400 the model rejects (not thinking, not key) moves on to the next model', async () => {
+  stubFetch([errRes(400, '{"error":{"message":"Unknown name"}}'), okRes()]);
+  const r = await checkBody(blob(), {});
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].url.includes('gemini-3.6-flash'));
+  assert.equal(r.build, 'average');
+});
+
+test('400 on every model shows Google\'s message', async () => {
+  const bad = () => errRes(400, '{"error":{"message":"Invalid value at response_schema"}}');
+  stubFetch([bad(), bad(), bad()]);
+  await assert.rejects(checkBody(blob(), {}), { message: /Gemini error \(400\): Invalid value/ });
 });
 
 test('attemptBudget: first model capped at 6500, fallback gets the rest, tiny remainder skipped', () => {
@@ -103,7 +118,7 @@ test('timeout on every model gives the too-long message, not offline', async (t)
   await flush(); t.mock.timers.tick(6500); await flush(); t.mock.timers.tick(3500);
   await done;
   assert.equal(calls.length, 2);
-  assert.ok(calls[1].url.includes('flash-lite'));
+  assert.ok(calls[1].url.includes('gemini-3.6-flash'));
 });
 
 test('flash timeout falls back to lite which succeeds', async (t) => {
