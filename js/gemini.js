@@ -56,15 +56,24 @@ export function clearGeminiKey() {
   notifyKeyChange();
 }
 
-// Aliases track the current free-tier models. The lite model is the fallback
-// when Flash is overloaded (503) or unavailable.
-const MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+// Tried in order. Flash-Lite first: it's the fastest free model, and every
+// answer here is an approximate estimate. Gemini 3.x models take
+// thinkingLevel (thinkingBudget is deprecated there, and sending both is a
+// 400); "minimal" is the lowest level they accept — 3.x can't switch
+// thinking fully off. The alias is a last resort with no thinking config, in
+// case Google retires a pinned id.
+const MODELS = [
+  { id: 'gemini-3.5-flash-lite', thinking: { thinkingLevel: 'minimal' } },
+  { id: 'gemini-3.6-flash', thinking: { thinkingLevel: 'minimal' } },
+  { id: 'gemini-flash-lite-latest', thinking: null },
+];
 const endpoint = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-// 429 too: each model has its own free-tier quota, so Lite can still answer
-// when Flash's per-minute limit is used up.
-const RETRYABLE = new Set([404, 429, 500, 503]);
-// Every answer here is an approximate estimate, so speed beats depth: the
-// model is told to answer at once and thinking is switched off.
+// 429 too: each model has its own free-tier quota, so the next can still
+// answer when one's per-minute limit is used up. 400 too (unless the key is
+// bad): a model that rejects a parameter shouldn't block the others.
+const RETRYABLE = new Set([400, 404, 429, 500, 503]);
+// Speed beats depth: the model is told to answer at once and thinking is
+// kept at its minimum.
 const FAST_INSTRUCTION = 'Answer immediately with your best estimate. Approximate values are fine — do not deliberate, double-check or explain. Keep every string short.';
 
 const PROMPT = `You are a nutrition estimator. Estimate the calories of the food in this photo.
@@ -144,7 +153,10 @@ function friendlyError(status, bodyText) {
   if (status === 429) return `Gemini free-tier limit reached${quotaLimitText(bodyText)}. Try again in a minute.`;
   if (status === 401 || status === 403) return 'Gemini API key is invalid.';
   if (status === 400 && /API_KEY_INVALID/.test(bodyText || '')) return 'Gemini API key is invalid.';
-  return `Gemini error (${status})`;
+  // Google's own message says which parameter or model it rejected.
+  let detail = '';
+  try { detail = JSON.parse(bodyText).error.message || ''; } catch (_) { /* not JSON */ }
+  return `Gemini error (${status})${detail ? ': ' + detail.slice(0, 160) : ''}`;
 }
 
 // Shared by estimateCalories/suggestMeals/checkBody: the key/offline checks,
@@ -168,22 +180,21 @@ export function attemptBudget(index, remainingMs) {
   return remainingMs < MIN_FALLBACK_MS ? 0 : remainingMs;
 }
 
-async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food.", timeoutMs = 10000, maxOutputTokens } = {}) {
+async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food.", timeoutMs = 10000 } = {}) {
   const key = getGeminiKey();
   if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
   if (!navigator.onLine) throw new Error(offlineMessage);
 
   const deadline = Date.now() + timeoutMs;
 
-  const makeBody = (noThinking) => JSON.stringify({
+  const makeBody = (thinking) => JSON.stringify({
     systemInstruction: { parts: [{ text: FAST_INSTRUCTION }] },
     contents: [{ parts }],
     generationConfig: {
       temperature,
       responseMimeType: 'application/json',
       responseSchema: schema,
-      ...(maxOutputTokens ? { maxOutputTokens } : {}),
-      ...(noThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+      ...(thinking ? { thinkingConfig: thinking } : {}),
     },
   });
 
@@ -222,14 +233,17 @@ async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "
     errText = null;
     res = undefined;
     try {
-      res = await send(MODELS[i], makeBody(true), budget);
+      const { id, thinking } = MODELS[i];
+      res = await send(id, makeBody(thinking), budget);
       if (res.status === 400) {
-        // A model that can't turn thinking off rejects thinkingConfig; resend
-        // once without it. res.text() consumes the body, so keep it for below.
+        // A model that rejects our thinkingConfig gets one resend without
+        // it. res.text() consumes the body, so keep it for below.
         errText = await res.text().catch(() => '');
-        if (/thinking/i.test(errText)) {
+        if (thinking && /thinking/i.test(errText)) {
           errText = null;
-          res = await send(MODELS[i], makeBody(false), attemptEnd - Date.now());
+          res = await send(id, makeBody(null), attemptEnd - Date.now());
+        } else if (/API_KEY_INVALID/.test(errText)) {
+          break;
         }
       }
     } catch (e) {
@@ -276,7 +290,7 @@ export async function estimateCalories(blob, note) {
     { inline_data: { mime_type: blob.type || 'image/jpeg', data } },
     { text },
   ];
-  const parsed = await callGemini(parts, SCHEMA, { maxOutputTokens: 1024 });
+  const parsed = await callGemini(parts, SCHEMA);
   return parseCalorieResult(parsed);
 }
 
@@ -433,7 +447,7 @@ export async function suggestMeals(input, avoidDishes, forDay) {
   if (!parsed) {
     const parts = [{ text: suggestPrompt(input, avoidDishes, forDay) }];
     logPromptSize('suggest', parts[0].text);
-    parsed = await callGemini(parts, SUGGEST_SCHEMA, { temperature: 0.8, maxOutputTokens: 2048, offlineMessage: "You're offline. Connect to get meal suggestions." });
+    parsed = await callGemini(parts, SUGGEST_SCHEMA, { temperature: 0.8, offlineMessage: "You're offline. Connect to get meal suggestions." });
   }
   const plan = parseMealPlan(parsed, { known: [...(input.dishFrequency || []).map((f) => f[0]), ...(input.recentPlans || []), ...(Array.isArray(avoidDishes) ? avoidDishes : [])] });
   const totals = planTotals(plan);
@@ -505,7 +519,7 @@ export async function checkBody(photoBlob, profile) {
     { inline_data: { mime_type: photoBlob.type || 'image/jpeg', data } },
     { text },
   ];
-  const parsed = await callGemini(parts, BODY_SCHEMA, { maxOutputTokens: 1024, offlineMessage: "You're offline. Connect to update your body check." });
+  const parsed = await callGemini(parts, BODY_SCHEMA, { offlineMessage: "You're offline. Connect to update your body check." });
   return parseBodyCheck(parsed, fallbackBmi);
 }
 
@@ -533,7 +547,6 @@ export async function reviewPlateau(input, ctx, imageBlob = null) {
     parsed = await callGemini(parts, REVIEW_SCHEMA, {
       temperature: 0.4,
       timeoutMs: 15000,
-      maxOutputTokens: 2048,
       offlineMessage: "You're offline. Connect to run the weight review.",
     });
   }
