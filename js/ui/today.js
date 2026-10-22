@@ -19,7 +19,7 @@ import { FEEL_TAGS, cleanFeel } from '../health.js';
 import { openReviewEntry } from './reviewSheet.js';
 import { targetFor, workoutBurnKcal, latestBodyWeightKg, latestBodyPhotoId, meetsGoal, WORKOUT_TYPES, INTENSITIES } from '../fitness.js';
 import { mealTimeLabel, sortMealsByAt, mergeAddToExisting, replaceKeepingLogged } from '../planLogic.js';
-import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey, pushPlanHistory, VARIETY_VALUES } from '../mealPlan.js';
+import { canSuggest, buildSuggestionInput, planTotals, scheduleOf, windowStatus, placeholderStatus, prefOptions, groceryList, groceryKey, pushPlanHistory, VARIETY_VALUES, MEAL_STYLES, cleanMealStyles, slotKey } from '../mealPlan.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE_MAP = { 'number-input': 'number', 'note-input': 'note' };
@@ -1388,6 +1388,30 @@ function prefPickerHtml(state) {
   return `<div class="section"><h2 class="section-header">Meal preference</h2><div class="segmented">${inputs}</div></div>`;
 }
 
+// "What do you feel like?": per-slot meal-type chips + a short note, same
+// markup as the Challenges → Meal schedule editor (slotStyleInputs). Edits
+// only update state.mealStyles (no re-render, so typing keeps focus); the
+// choice is saved to the profile when Suggest / New ideas runs.
+function mealStylePickerHtml(state, schedule) {
+  const slots = (schedule && Array.isArray(schedule.slots)) ? schedule.slots : [];
+  if (!slots.length) return '';
+  const blocks = slots.map((s) => {
+    const key = slotKey(s.name);
+    const e = state.mealStyles[key] || {};
+    const on = Array.isArray(e.styles) ? e.styles : [];
+    const chips = MEAL_STYLES.map(([v, l]) =>
+      `<label><input type="checkbox" data-role="meal-style" data-slot="${esc(key)}" value="${v}" ${on.includes(v) ? 'checked' : ''}><span>${esc(l)}</span></label>`
+    ).join('');
+    return `<div class="row"><span class="field-label">${esc(s.name)}${s.time ? ` · ${esc(s.time)}` : ''}</span></div>
+      <div class="row slot-style">
+        <div class="segmented segmented-wrap segmented-3">${chips}</div>
+        <input type="text" data-role="meal-style-note" data-slot="${esc(key)}" maxlength="80" value="${esc(typeof e.note === 'string' ? e.note : '')}" placeholder="Anything specific? e.g. curd rice" />
+      </div>`;
+  }).join('');
+  return `<div class="section"><h2 class="section-header">What do you feel like?</h2>${blocks}
+    <p class="section-footer">Leave blank for any. Saved for next time.</p></div>`;
+}
+
 // Familiar · Balanced · Explore (R3), remembered in tracker:suggestVariety.
 const VARIETY_LABELS = { familiar: 'Familiar', balanced: 'Balanced', explore: 'Explore' };
 const VARIETY_KEY = 'tracker:suggestVariety';
@@ -1457,9 +1481,10 @@ function addAllAskHtml(state, addAllDisabled, allAdded) {
   return `<button type="button" class="btn btn-primary" data-role="plan-add-all"${addAllDisabled ? ' disabled' : ''}>${allAdded ? 'All added to plan' : (state.dayLabel ? `Add all to ${label}` : 'Add all to tomorrow’s plan')}</button>`;
 }
 
-function mealPlanBodyHtml(state) {
+function mealPlanBodyHtml(state, schedule) {
   if (state.stage === 'pick' && !state.loading) {
-    return `${prefPickerHtml(state)}
+    return `${mealStylePickerHtml(state, schedule)}
+      ${prefPickerHtml(state)}
       ${varietyPickerHtml(state)}
       <button type="button" class="btn btn-primary" data-role="meal-plan-go">Suggest</button>
       <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Cancel</button>`;
@@ -1487,6 +1512,7 @@ function mealPlanBodyHtml(state) {
     ${groceryHtml(state)}
     ${addAllAskHtml(state, addAllDisabled, allAdded)}
     ${addAllError}
+    <button type="button" class="btn btn-secondary" data-role="meal-plan-restyle"${state.busy ? ' disabled' : ''}>Change meal types</button>
     <div class="btn-pair">
       <button type="button" class="btn btn-secondary" data-role="meal-plan-new"${state.busy ? ' disabled' : ''}>${state.busy ? loaderHtml('Thinking…') : 'New ideas'}</button>
       <button type="button" class="btn btn-secondary" data-role="meal-plan-close">Close</button>
@@ -1527,6 +1553,7 @@ export function openMealPlanSheet(ctx, opts = {}) {
     diet: challenge.profile && challenge.profile.diet,
     pref: startPref,
     variety: loadVariety(),
+    mealStyles: JSON.parse(JSON.stringify(cleanMealStyles(challenge.profile && challenge.profile.mealStyles) || {})),
     coach: existing ? existing.coach : null,
     fixes: existing ? existing.fixes : [],
     have: existing ? existing.have : [],
@@ -1553,7 +1580,7 @@ export function openMealPlanSheet(ctx, opts = {}) {
   };
 
   let sheetEl = null;
-  const render = () => `<div id="meal-plan-root">${mealPlanBodyHtml(state)}</div>`;
+  const render = () => `<div id="meal-plan-root">${mealPlanBodyHtml(state, currentSchedule)}</div>`;
 
   const close = openSheet({
     title: state.dayLabel ? `Meal plan · ${state.dayLabel}` : "Tomorrow's meal plan",
@@ -1574,6 +1601,15 @@ export function openMealPlanSheet(ctx, opts = {}) {
     if (state.stage === 'pick') { state.stage = 'plan'; state.loading = true; }
     rerenderSheet();
     try {
+      // Remember the picked meal types (only when they changed) so the
+      // prompt below, which reads the fresh challenge, and the Challenges
+      // editor both see them.
+      const profile = (store.state.challenges.find((c) => c.id === ctx.challengeId) || challenge).profile || {};
+      const picked = cleanMealStyles(state.mealStyles);
+      if (JSON.stringify(picked) !== JSON.stringify(cleanMealStyles(profile.mealStyles))) {
+        const { mealStyles: _old, ...rest } = profile;
+        await store.patchChallenge(ctx.challengeId, { profile: picked ? { ...rest, mealStyles: picked } : rest });
+      }
       // The weekly body check (if due) refreshes first, so this suggestion
       // uses the freshest body-check text — see refreshBodyCheckIfDue.
       await refreshBodyCheckIfDue(challenge).catch((err) => console.error('Body check failed:', err));
@@ -1747,6 +1783,14 @@ export function openMealPlanSheet(ctx, opts = {}) {
         saveVariety(state.variety);
         return;
       }
+      const styleInput = e.target.closest('[data-role="meal-style"]');
+      if (styleInput) {
+        const slot = styleInput.dataset.slot;
+        const entry = state.mealStyles[slot] || (state.mealStyles[slot] = { styles: [], note: '' });
+        entry.styles = (entry.styles || []).filter((v) => v !== styleInput.value);
+        if (styleInput.checked) entry.styles.push(styleInput.value);
+        return;
+      }
       const haveInput = e.target.closest('[data-role="grocery-have"]');
       if (haveInput) {
         const key = haveInput.dataset.key;
@@ -1758,7 +1802,21 @@ export function openMealPlanSheet(ctx, opts = {}) {
         rerenderSheet();
       }
     });
+    // Note typing only updates state — no re-render, so focus stays put.
+    el.addEventListener('input', (e) => {
+      const noteInput = e.target.closest('[data-role="meal-style-note"]');
+      if (!noteInput) return;
+      const slot = noteInput.dataset.slot;
+      const entry = state.mealStyles[slot] || (state.mealStyles[slot] = { styles: [], note: '' });
+      entry.note = noteInput.value;
+    });
     el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-role="meal-plan-restyle"]')) {
+        if (state.busy) return;
+        state.stage = 'pick';
+        rerenderSheet();
+        return;
+      }
       if (e.target.closest('[data-role="meal-plan-close"]')) {
         close();
         return;

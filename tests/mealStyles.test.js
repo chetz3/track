@@ -42,7 +42,7 @@ test('slotKey and slotStyle', () => {
 
 test('suggestPrompt: slot preferences and rule 9', () => {
   const p = suggestPrompt(input(STYLES));
-  assert.match(p, /Breakfast \(08:00\) = chapati\/roti \+ gravy\/curry OR one-pot/);
+  assert.match(p, /Breakfast \(08:00\) = chapati\/roti \+ gravy\/curry OR one dish on its own/);
   assert.ok(p.includes('("chapati gravy or bisibele bath")'));
   assert.ok(p.includes('Lunch (13:00) = rice + gravy'));
   assert.ok(p.includes('9. A slot with "="'));
@@ -65,4 +65,9 @@ test('buildSuggestionInput passes cleaned mealStyles through', () => {
   const challenge = { id: 'c', profile: { sex: 'male', age: 30, heightCm: 170, startWeightKg: 70, diet: 'veg', mealStyles: { lunch: { styles: ['rice', 'zzz'], note: ' hi ' } } }, steps: [] };
   assert.deepEqual(buildSuggestionInput(challenge, {}, TODAY, 'mix').profile.mealStyles, { lunch: { styles: ['rice'], note: 'hi' } });
   assert.equal(buildSuggestionInput({ ...challenge, profile: { ...challenge.profile, mealStyles: {} } }, {}, TODAY, 'mix').profile.mealStyles, null);
+});
+
+test('single_curry is a valid style key and reaches the prompt', () => {
+  assert.deepEqual(cleanMealStyles({ lunch: { styles: ['single_curry', 'rice'], note: '' } }).lunch.styles, ['rice', 'single_curry']);
+  assert.ok(suggestPrompt(input({ lunch: { styles: ['single_curry'], note: '' } })).includes('Lunch (13:00) = one main item with a curry/raita/chutney on the side'));
 });
