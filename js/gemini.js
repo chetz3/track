@@ -157,10 +157,23 @@ function friendlyError(status, bodyText) {
 // food (which this message was originally written for) show wording that
 // fits what they were trying to do; estimateCalories's own default keeps its
 // original text unchanged.
-async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food." } = {}) {
+// Time budget (ms) for one model attempt: the first model gets at most
+// FIRST_ATTEMPT_MS of the overall deadline, a fallback gets whatever is left
+// (0 = too little left to bother). Pure, so it can be unit-tested.
+const FIRST_ATTEMPT_MS = 6500;
+const MIN_FALLBACK_MS = 1500;
+export function attemptBudget(index, remainingMs) {
+  if (remainingMs <= 0) return 0;
+  if (index === 0) return Math.min(FIRST_ATTEMPT_MS, remainingMs);
+  return remainingMs < MIN_FALLBACK_MS ? 0 : remainingMs;
+}
+
+async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food.", timeoutMs = 10000, maxOutputTokens } = {}) {
   const key = getGeminiKey();
   if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
   if (!navigator.onLine) throw new Error(offlineMessage);
+
+  const deadline = Date.now() + timeoutMs;
 
   const makeBody = (noThinking) => JSON.stringify({
     systemInstruction: { parts: [{ text: FAST_INSTRUCTION }] },
@@ -169,39 +182,68 @@ async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "
       temperature,
       responseMimeType: 'application/json',
       responseSchema: schema,
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
       ...(noThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
     },
   });
 
-  const send = async (model, body) => {
+  const send = async (model, body, ms) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), Math.max(ms, 1));
     try {
       return await fetch(endpoint(model), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body,
+        signal: ctrl.signal,
       });
-    } catch (_) {
+    } catch (e) {
+      // An abort is our own time cap, not a network problem.
+      if (e && e.name === 'AbortError') {
+        const t = new Error('timeout');
+        t.timedOut = true;
+        throw t;
+      }
       // fetch rejects on a genuine network failure (offline mid-request, DNS,
       // connection reset) — navigator.onLine already caught the common case.
       throw new Error(offlineMessage);
+    } finally {
+      clearTimeout(timer);
     }
   };
 
   let res;
   let errText = null;
-  for (const model of MODELS) {
+  let timedOut = false;
+  for (let i = 0; i < MODELS.length; i++) {
+    const budget = attemptBudget(i, deadline - Date.now());
+    if (!budget) break;
+    const attemptEnd = Date.now() + budget;
     errText = null;
-    res = await send(model, makeBody(true));
-    if (res.status === 400) {
-      // A model that can't turn thinking off rejects thinkingConfig; resend
-      // once without it. res.text() consumes the body, so keep it for below.
-      errText = await res.text().catch(() => '');
-      if (/thinking/i.test(errText)) {
-        errText = null;
-        res = await send(model, makeBody(false));
+    res = undefined;
+    try {
+      res = await send(MODELS[i], makeBody(true), budget);
+      if (res.status === 400) {
+        // A model that can't turn thinking off rejects thinkingConfig; resend
+        // once without it. res.text() consumes the body, so keep it for below.
+        errText = await res.text().catch(() => '');
+        if (/thinking/i.test(errText)) {
+          errText = null;
+          res = await send(MODELS[i], makeBody(false), attemptEnd - Date.now());
+        }
       }
+    } catch (e) {
+      if (!e.timedOut) throw e;
+      timedOut = true;
+      res = undefined;
+      continue;
     }
     if (res.ok || !RETRYABLE.has(res.status)) break;
+  }
+
+  if (!res) {
+    if (timedOut) throw new Error(`Gemini took too long (over ${Math.round(timeoutMs / 1000)} s). Try again.`);
+    throw new Error('Gemini error (no response)');
   }
 
   if (!res.ok) {
@@ -234,7 +276,7 @@ export async function estimateCalories(blob, note) {
     { inline_data: { mime_type: blob.type || 'image/jpeg', data } },
     { text },
   ];
-  const parsed = await callGemini(parts, SCHEMA);
+  const parsed = await callGemini(parts, SCHEMA, { maxOutputTokens: 1024 });
   return parseCalorieResult(parsed);
 }
 
@@ -391,7 +433,7 @@ export async function suggestMeals(input, avoidDishes, forDay) {
   if (!parsed) {
     const parts = [{ text: suggestPrompt(input, avoidDishes, forDay) }];
     logPromptSize('suggest', parts[0].text);
-    parsed = await callGemini(parts, SUGGEST_SCHEMA, { temperature: 0.8, offlineMessage: "You're offline. Connect to get meal suggestions." });
+    parsed = await callGemini(parts, SUGGEST_SCHEMA, { temperature: 0.8, maxOutputTokens: 2048, offlineMessage: "You're offline. Connect to get meal suggestions." });
   }
   const plan = parseMealPlan(parsed, { known: [...(input.dishFrequency || []).map((f) => f[0]), ...(input.recentPlans || []), ...(Array.isArray(avoidDishes) ? avoidDishes : [])] });
   const totals = planTotals(plan);
@@ -463,7 +505,7 @@ export async function checkBody(photoBlob, profile) {
     { inline_data: { mime_type: photoBlob.type || 'image/jpeg', data } },
     { text },
   ];
-  const parsed = await callGemini(parts, BODY_SCHEMA, { offlineMessage: "You're offline. Connect to update your body check." });
+  const parsed = await callGemini(parts, BODY_SCHEMA, { maxOutputTokens: 1024, offlineMessage: "You're offline. Connect to update your body check." });
   return parseBodyCheck(parsed, fallbackBmi);
 }
 
@@ -490,6 +532,8 @@ export async function reviewPlateau(input, ctx, imageBlob = null) {
     if (imageBlob) parts.push({ inlineData: { mimeType: 'image/jpeg', data: await blobToBase64(imageBlob) } });
     parsed = await callGemini(parts, REVIEW_SCHEMA, {
       temperature: 0.4,
+      timeoutMs: 15000,
+      maxOutputTokens: 2048,
       offlineMessage: "You're offline. Connect to run the weight review.",
     });
   }

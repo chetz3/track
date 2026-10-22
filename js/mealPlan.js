@@ -153,9 +153,10 @@ export function coachFromReview(review, today) {
 
 // [key, chip label, prompt hint]
 export const MEAL_STYLES = [
-  ['rice', 'Rice meal', 'rice + gravy/sambar/curry + a side like poriyal'],
-  ['roti', 'Roti', 'chapati/roti + gravy/curry'],
-  ['onepot', 'One-pot', 'one-pot dish like bisibele bath, pongal, upma, khichdi, biryani'],
+  ['rice', 'Rice + gravy', 'rice + gravy/sambar/curry + a side like poriyal'],
+  ['roti', 'Roti + curry', 'chapati/roti + gravy/curry'],
+  ['onepot', 'Single item', 'one dish on its own, no side curry, e.g. bisibele bath, pulao, upma, khichdi, biryani'],
+  ['single_curry', 'Single + curry', 'one main item with a curry/raita/chutney on the side, e.g. pulao + raita, dosa + sambar'],
   ['tiffin', 'Tiffin', 'tiffin like idli/dosa + chutney/sambar'],
   ['light', 'Light', 'light: fruit, sprouts, sundal, buttermilk or a snack'],
 ];
