@@ -169,23 +169,10 @@ function friendlyError(status, bodyText) {
 // food (which this message was originally written for) show wording that
 // fits what they were trying to do; estimateCalories's own default keeps its
 // original text unchanged.
-// Time budget (ms) for one model attempt: the first model gets at most
-// FIRST_ATTEMPT_MS of the overall deadline, a fallback gets whatever is left
-// (0 = too little left to bother). Pure, so it can be unit-tested.
-const FIRST_ATTEMPT_MS = 6500;
-const MIN_FALLBACK_MS = 1500;
-export function attemptBudget(index, remainingMs) {
-  if (remainingMs <= 0) return 0;
-  if (index === 0) return Math.min(FIRST_ATTEMPT_MS, remainingMs);
-  return remainingMs < MIN_FALLBACK_MS ? 0 : remainingMs;
-}
-
-async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food.", timeoutMs = 10000 } = {}) {
+async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food." } = {}) {
   const key = getGeminiKey();
   if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
   if (!navigator.onLine) throw new Error(offlineMessage);
-
-  const deadline = Date.now() + timeoutMs;
 
   const makeBody = (thinking) => JSON.stringify({
     systemInstruction: { parts: [{ text: FAST_INSTRUCTION }] },
@@ -198,66 +185,41 @@ async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "
     },
   });
 
-  const send = async (model, body, ms) => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), Math.max(ms, 1));
+  const send = async (model, body) => {
+    const started = Date.now();
     try {
-      return await fetch(endpoint(model), {
+      const r = await fetch(endpoint(model), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body,
-        signal: ctrl.signal,
       });
-    } catch (e) {
-      // An abort is our own time cap, not a network problem.
-      if (e && e.name === 'AbortError') {
-        const t = new Error('timeout');
-        t.timedOut = true;
-        throw t;
-      }
+      // Which model answered and how long it took, for tuning speed.
+      console.info(`[gemini] ${model} ${r.status} in ${Date.now() - started} ms`);
+      return r;
+    } catch (_) {
       // fetch rejects on a genuine network failure (offline mid-request, DNS,
       // connection reset) — navigator.onLine already caught the common case.
       throw new Error(offlineMessage);
-    } finally {
-      clearTimeout(timer);
     }
   };
 
   let res;
   let errText = null;
-  let timedOut = false;
-  for (let i = 0; i < MODELS.length; i++) {
-    const budget = attemptBudget(i, deadline - Date.now());
-    if (!budget) break;
-    const attemptEnd = Date.now() + budget;
+  for (const { id, thinking } of MODELS) {
     errText = null;
-    res = undefined;
-    try {
-      const { id, thinking } = MODELS[i];
-      res = await send(id, makeBody(thinking), budget);
-      if (res.status === 400) {
-        // A model that rejects our thinkingConfig gets one resend without
-        // it. res.text() consumes the body, so keep it for below.
-        errText = await res.text().catch(() => '');
-        if (thinking && /thinking/i.test(errText)) {
-          errText = null;
-          res = await send(id, makeBody(null), attemptEnd - Date.now());
-        } else if (/API_KEY_INVALID/.test(errText)) {
-          break;
-        }
+    res = await send(id, makeBody(thinking));
+    if (res.status === 400) {
+      // A model that rejects our thinkingConfig gets one resend without
+      // it. res.text() consumes the body, so keep it for below.
+      errText = await res.text().catch(() => '');
+      if (thinking && /thinking/i.test(errText)) {
+        errText = null;
+        res = await send(id, makeBody(null));
+      } else if (/API_KEY_INVALID/.test(errText)) {
+        break;
       }
-    } catch (e) {
-      if (!e.timedOut) throw e;
-      timedOut = true;
-      res = undefined;
-      continue;
     }
     if (res.ok || !RETRYABLE.has(res.status)) break;
-  }
-
-  if (!res) {
-    if (timedOut) throw new Error(`Gemini took too long (over ${Math.round(timeoutMs / 1000)} s). Try again.`);
-    throw new Error('Gemini error (no response)');
   }
 
   if (!res.ok) {
@@ -546,7 +508,6 @@ export async function reviewPlateau(input, ctx, imageBlob = null) {
     if (imageBlob) parts.push({ inlineData: { mimeType: 'image/jpeg', data: await blobToBase64(imageBlob) } });
     parsed = await callGemini(parts, REVIEW_SCHEMA, {
       temperature: 0.4,
-      timeoutMs: 15000,
       offlineMessage: "You're offline. Connect to run the weight review.",
     });
   }
