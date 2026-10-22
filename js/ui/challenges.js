@@ -22,7 +22,7 @@ import { closeSheet } from './sheet.js';
 import { presetSteps, dirLabel, goalPlan, latestBodyPhotoId } from '../fitness.js';
 import { connect, disconnect, getAuthState, clearAuthError } from '../googleAuth.js';
 import { getGeminiKey, setGeminiKey, clearGeminiKey, GEMINI_KEY_RE } from '../gemini.js';
-import { defaultSlots, ifSlots, scheduleOf } from '../mealPlan.js';
+import { defaultSlots, ifSlots, scheduleOf, MEAL_STYLES, slotKey, cleanMealStyles } from '../mealPlan.js';
 import { CONDITIONS, MEDS_FLAGS, LAB_FIELDS, emptyHealthDraft, healthToDraft, draftToHealth } from '../health.js';
 
 // Fitness weeks need 5 green days; the 3rd red day in a week resets.
@@ -362,7 +362,7 @@ function defaultSchedule() {
 function defaultProfileDraft() {
   return {
     sex: 'male', age: '30', heightCm: '170', startWeightKg: '70', targetWeightKg: '65', activity: 'sedentary', aim: 'maintain',
-    location: '', cuisine: '', diet: '', avoid: '', schedule: defaultSchedule(), shareBodyPhoto: false,
+    location: '', cuisine: '', diet: '', avoid: '', schedule: defaultSchedule(), mealStyles: {}, shareBodyPhoto: false,
     health: emptyHealthDraft(),
   };
 }
@@ -386,6 +386,7 @@ function profileToDraft(p) {
     // migrated") — cloned so editing the draft never mutates the stored
     // challenge's profile in place.
     schedule: { ...sched, slots: sched.slots.map((s) => ({ ...s })) },
+    mealStyles: JSON.parse(JSON.stringify(cleanMealStyles(p.mealStyles) || {})),
     shareBodyPhoto: !!p.shareBodyPhoto,
     health: healthToDraft(p.health),
   };
@@ -399,6 +400,7 @@ function profileToDraft(p) {
 // profile itself; canSuggest/js/ui/today.js gate on diet being set instead.
 function parseProfileDraft(p) {
   const health = draftToHealth(p.health);
+  const mealStyles = cleanMealStyles(p.mealStyles);
   return {
     sex: p.sex,
     age: parseIntStrict(p.age),
@@ -420,6 +422,7 @@ function parseProfileDraft(p) {
         ? p.schedule.slots.map((s) => ({ name: String((s && s.name) || ''), time: String((s && s.time) || '') }))
         : [],
     },
+    ...(mealStyles ? { mealStyles } : {}),
     shareBodyPhoto: !!p.shareBodyPhoto,
     // Optional health info (Plateau Coach): the key is omitted when empty so
     // a profile without it stays exactly as it was.
@@ -437,7 +440,25 @@ function regenerateScheduleSlots(schedule) {
     : defaultSlots(schedule);
 }
 
-function scheduleHtml(schedule) {
+const SLOT_NOTE_PLACEHOLDERS = {
+  breakfast: 'e.g. chapati + gravy, or bisibele bath',
+  lunch: 'e.g. gravy rice + poriyal',
+  dinner: 'e.g. chapati + dal',
+};
+
+function slotNotePlaceholder(name) {
+  return SLOT_NOTE_PLACEHOLDERS[slotKey(name)] || 'Optional note';
+}
+
+function slotStyleInputs(name, mealStyles) {
+  const key = slotKey(name);
+  const on = ((mealStyles || {})[key] || {}).styles || [];
+  return MEAL_STYLES.map(([v, l]) =>
+    `<label><input type="checkbox" data-role="slot-style" data-slot="${esc(key)}" value="${v}" ${on.includes(v) ? 'checked' : ''}><span>${esc(l)}</span></label>`
+  ).join('');
+}
+
+function scheduleHtml(schedule, mealStyles) {
   const patternInputs = [['regular', 'Regular'], ['if', 'Intermittent fasting']].map(([v, l]) =>
     `<label><input type="radio" name="schedule-pattern" value="${v}" data-role="schedule-pattern" ${schedule.pattern === v ? 'checked' : ''}><span>${esc(l)}</span></label>`
   ).join('');
@@ -470,6 +491,10 @@ function scheduleHtml(schedule) {
   const slotsHtml = (schedule.slots || []).map((s, i) => `<div class="row">
     <span class="field-label">${esc(s.name)}</span>
     <input type="time" data-role="schedule-slot-time" data-index="${i}" value="${esc(s.time)}" />
+  </div>
+  <div class="row slot-style">
+    <div class="segmented segmented-wrap segmented-3">${slotStyleInputs(s.name, mealStyles)}</div>
+    <input type="text" data-role="slot-style-note" data-slot="${esc(slotKey(s.name))}" value="${esc(((mealStyles || {})[slotKey(s.name)] || {}).note || '')}" placeholder="${esc(slotNotePlaceholder(s.name))}" />
   </div>`).join('');
 
   return `<div class="row"><span class="field-label">Eating pattern</span><div class="segmented">${patternInputs}</div></div>
@@ -725,8 +750,8 @@ function profileHtml(draft, challenge) {
   ${healthHtml(p.health)}
   <div class="section">
     <h2 class="section-header">Meal schedule</h2>
-    <div class="group">${scheduleHtml(p.schedule)}</div>
-    <p class="section-footer">The AI meal plan uses these exact slots. You can edit any time.</p>
+    <div class="group">${scheduleHtml(p.schedule, p.mealStyles)}</div>
+    <p class="section-footer">The AI meal plan uses these exact slots. Tick meal types per slot (none = any).</p>
   </div>
   ${bodyCheckCardHtml(challenge, draft)}`;
 }
@@ -902,6 +927,12 @@ async function handleDeleteChallenge() {
   }
 }
 
+// The draft's meal-type entry for a slot, created on first use.
+function slotStyleEntry(slot) {
+  const ms = formDraft.profile.mealStyles || (formDraft.profile.mealStyles = {});
+  return ms[slot] || (ms[slot] = { styles: [], note: '' });
+}
+
 function wireFormDelegation(root) {
   if (root.__formWired) return;
   root.__formWired = true;
@@ -920,6 +951,7 @@ function wireFormDelegation(root) {
     else if (role === 'profile-location') formDraft.profile.location = e.target.value;
     else if (role === 'profile-cuisine') formDraft.profile.cuisine = e.target.value;
     else if (role === 'profile-avoid') formDraft.profile.avoid = e.target.value;
+    else if (role === 'slot-style-note') slotStyleEntry(e.target.dataset.slot).note = e.target.value;
     else if (role === 'health-sensitivities') formDraft.profile.health.sensitivities = e.target.value;
     else if (role === 'health-meds') formDraft.profile.health.meds = e.target.value;
     else if (role === 'health-waist') {
@@ -943,6 +975,10 @@ function wireFormDelegation(root) {
         formDraft.steps = presetSteps(parseProfileDraft(formDraft.profile), g?.days);
       }
       current.rerender();
+    } else if (role === 'slot-style') {
+      const entry = slotStyleEntry(e.target.dataset.slot);
+      entry.styles = entry.styles.filter((v) => v !== e.target.value);
+      if (e.target.checked) entry.styles.push(e.target.value);
     } else if (role === 'profile-sex') {
       formDraft.profile.sex = e.target.value;
     } else if (role === 'profile-activity') {

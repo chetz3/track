@@ -149,6 +149,49 @@ export function coachFromReview(review, today) {
   };
 }
 
+// ---------- per-slot meal-type preference ----------
+
+// [key, chip label, prompt hint]
+export const MEAL_STYLES = [
+  ['rice', 'Rice meal', 'rice + gravy/sambar/curry + a side like poriyal'],
+  ['roti', 'Roti', 'chapati/roti + gravy/curry'],
+  ['onepot', 'One-pot', 'one-pot dish like bisibele bath, pongal, upma, khichdi, biryani'],
+  ['tiffin', 'Tiffin', 'tiffin like idli/dosa + chutney/sambar'],
+  ['light', 'Light', 'light: fruit, sprouts, sundal, buttermilk or a snack'],
+];
+
+// Keyed by slot name (not index) so regenerating slots when the meal count
+// changes keeps the Breakfast/Lunch/Dinner preferences.
+export function slotKey(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+// Normalises profile.mealStyles: valid style keys only (deduped, MEAL_STYLES
+// order), note trimmed to 80 chars, empty entries dropped. null when nothing
+// is left, so the saved profile and the prompt stay unchanged for users who
+// set no preference.
+export function cleanMealStyles(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const k of Object.keys(raw)) {
+    const e = raw[k];
+    if (!e || typeof e !== 'object') continue;
+    const have = new Set(Array.isArray(e.styles) ? e.styles : []);
+    const styles = MEAL_STYLES.map(([key]) => key).filter((key) => have.has(key));
+    const note = typeof e.note === 'string' ? e.note.trim().slice(0, 80) : '';
+    if (styles.length || note) out[k] = { styles, note };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+export function slotStyle(mealStyles, name) {
+  const e = mealStyles && mealStyles[slotKey(name)];
+  return {
+    styles: e && Array.isArray(e.styles) ? e.styles : [],
+    note: e && typeof e.note === 'string' ? e.note : '',
+  };
+}
+
 // Builds the whole payload for one meal-suggestion call: the profile,
 // today's food targets, the last 7 days (today inclusive) of meals/workout/
 // steps/water/sleep, and the body check text. `today` is the date the
@@ -239,6 +282,7 @@ export function buildSuggestionInput(challenge, daysMap, today, pref, variety) {
       // must use exactly these slots — same count, names and times — and
       // (for intermittent fasting) never suggest food outside the window.
       schedule: scheduleOf(profile),
+      mealStyles: cleanMealStyles(profile.mealStyles),
     },
     targets,
     last7Days,
