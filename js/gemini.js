@@ -6,7 +6,7 @@
 // is sent as the x-goog-api-key header on each request.
 
 import { parseCalorieResult } from './foodLogic.js';
-import { parseMealPlan, planTotals, kcalWarning, eatingWindow, compactSuggestInput } from './mealPlan.js';
+import { parseMealPlan, planTotals, kcalWarning, eatingWindow, compactSuggestInput, MEAL_STYLES, slotStyle } from './mealPlan.js';
 import { REVIEW_SCHEMA, reviewPrompt, parseReview } from './coach.js';
 
 // Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
@@ -315,12 +315,21 @@ const VARIETY_RULES = {
 // fits calories and macros into the window and never suggests food outside
 // it."). `input.profile.schedule` always exists — buildSuggestionInput runs
 // every profile through js/mealPlan.js's scheduleOf first.
-function scheduleLines(schedule) {
+function scheduleLines(schedule, mealStyles) {
   const slots = (schedule && Array.isArray(schedule.slots)) ? schedule.slots : [];
-  const slotList = slots.map((s) => `${s.name} (${s.time})`).join(', ');
+  // A slot's meal-type preference is appended as " = hint OR hint (\"note\")".
+  let hasStyles = false;
+  const slotList = slots.map((s) => {
+    const { styles, note } = slotStyle(mealStyles, s.name);
+    const hints = styles.map((k) => (MEAL_STYLES.find((m) => m[0] === k) || [])[2]).filter(Boolean);
+    if (!hints.length && !note) return `${s.name} (${s.time})`;
+    hasStyles = true;
+    const pref = hints.length ? hints.join(' OR ') + (note ? ` ("${note}")` : '') : `"${note}"`;
+    return `${s.name} (${s.time}) = ${pref}`;
+  }).join(', ');
   const win = eatingWindow(schedule);
   const windowLine = win ? ` Eat only ${win.start}–${win.end} (fasting window).` : '';
-  return { count: slots.length || 1, slotList, windowLine };
+  return { count: slots.length || 1, slotList, windowLine, hasStyles };
 }
 
 // docs §12.1, verbatim apart from the ${} wiring. If the built prompt is over
@@ -328,7 +337,7 @@ function scheduleLines(schedule) {
 export const SUGGEST_BUDGET_CHARS = 6000;
 
 export function suggestPrompt(input, avoidDishes, forDay = 'tomorrow') {
-  const { slotList, windowLine } = scheduleLines(input.profile && input.profile.schedule);
+  const { slotList, windowLine, hasStyles } = scheduleLines(input.profile && input.profile.schedule, input.profile && input.profile.mealStyles);
   const data = compactSuggestInput(input, avoidDishes);
   const variety = VARIETY_RULES[input.variety] ? input.variety : 'balanced';
   const t = input.targets || {};
@@ -340,6 +349,9 @@ export function suggestPrompt(input, avoidDishes, forDay = 'tomorrow') {
   const coachRule = data.coach
     ? '\n6b. Fix coach.mistakes and follow coach.changes; prefer coach.foods. Name the mistake fixed in fixes.'
     : '';
+  const styleRule = hasStyles
+    ? '\n9. A slot with "=" is the user\'s meal-type preference: that slot\'s dish must be that type (diet and avoid still win). Name every part in dish, e.g. "Rice, sambar, beans poriyal".'
+    : '';
   const build = () => `Plan meals for ${forDay} (${input.month || ''}). One dish per slot: ${slotList}.${windowLine}
 Legend: y=yesterday [dish,kcal,p,c,f,fib,time]; gaps=[nutrient,yesterday,target,short|over]; freq=[dish,times] last 14 days; recent=dishes in last 3 plans; avoid=never use; coach=fixes from their weight review.
 Rules:
@@ -350,7 +362,7 @@ Rules:
 5. Any dish not in freq must be commonly eaten or sold in ${location}, in season, cookable on a weekday.
 6. Close gaps: short → more of it, over → less.${coachRule}
 7. Day total within ±5% of ${kcal} kcal. Push protein toward ${protein} g and fibre toward ${fiber} g with real foods; report true values, never inflate them to hit a target.
-8. Realistic home portions; kcal and macros must match the portion. Ingredients = what the dish is really made of.
+8. Realistic home portions; kcal and macros must match the portion. Ingredients = what the dish is really made of.${styleRule}
 Output: ingredients for 1 serving, raw qty. local_note ≤ 8 words (where to buy/eat). fixes ≤ 3 ("gap → how"). why ≤ 2. tips ≤ 2. Every string ≤ 15 words.
 Data:${JSON.stringify(data)}`;
   let text = build();

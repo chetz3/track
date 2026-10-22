@@ -86,6 +86,9 @@ body { padding: env(safe-area-inset-top) 0 calc(104px + env(safe-area-inset-bott
 .switch:checked::after { transform: translateX(20px); }
 .segmented { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--raised); border-radius: 12px; padding: 3px; flex: 1; }
 .segmented.segmented-wrap { grid-auto-flow: row; grid-template-columns: repeat(4, 1fr); gap: 2px; } /* step-editor's 7-option Type row: too many for a single row */
+.segmented.segmented-wrap.segmented-3 { grid-template-columns: repeat(3, 1fr); }
+.row.slot-style { flex-direction: column; align-items: stretch; gap: 4px; } /* chips above the note, full width */
+.row.slot-style input[type=text] { text-align: left; flex: none; }
 .segmented label { text-align: center; font-size: 13px; font-weight: 700; padding: 11px 4px; border-radius: 10px; cursor: pointer; }
 .segmented input { display: none; }
 .segmented input:checked + span { display: block; background: var(--grouped); color: var(--accent-ink); box-shadow: var(--shadow-press); border-radius: 10px; margin: -11px -4px; padding: 11px 4px; }
