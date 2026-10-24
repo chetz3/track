@@ -21,7 +21,7 @@ import { openStepEditor } from './stepEditor.js';
 import { closeSheet } from './sheet.js';
 import { presetSteps, dirLabel, goalPlan, latestBodyPhotoId } from '../fitness.js';
 import { connect, disconnect, getAuthState, clearAuthError } from '../googleAuth.js';
-import { getGeminiKey, setGeminiKey, clearGeminiKey, GEMINI_KEY_RE } from '../gemini.js';
+import { PROVIDERS, getKey, setKey, clearKey } from '../ai/keys.js';
 import { defaultSlots, ifSlots, scheduleOf, MEAL_STYLES, slotKey, cleanMealStyles } from '../mealPlan.js';
 import { CONDITIONS, MEDS_FLAGS, LAB_FIELDS, emptyHealthDraft, healthToDraft, draftToHealth } from '../health.js';
 
@@ -163,37 +163,38 @@ function googleSectionHtml() {
   </div>`;
 }
 
-function geminiSectionHtml() {
-  const key = getGeminiKey();
-
-  if (key) {
-    const last4 = key.slice(-4);
-    return `<div class="section">
-      <h2 class="section-header">Gemini AI (your key)</h2>
-      <div class="group">
-        <div class="row">
-          <span class="row-label">Key saved · ••••${esc(last4)}</span>
-        </div>
-      </div>
-      <button type="button" class="btn btn-danger" data-role="gemini-remove">Remove</button>
-    </div>`;
-  }
-
-  return `<div class="section">
-    <h2 class="section-header">Gemini AI (your key)</h2>
-    <div class="group">
-      <div class="row">
-        <input type="password" data-role="gemini-key" placeholder="Paste API key" style="text-align:left" />
-      </div>
-    </div>
-    <button type="button" class="btn btn-primary" data-role="gemini-save">Save</button>
-    <p class="section-footer">Optional, but FueLoop works best with it: automatic calories from photos, meal ideas and a grocery list. It's free and takes about 2 minutes:</p>
+const GEMINI_STEPS_HTML = `<p class="section-footer">It's free and takes about 2 minutes:</p>
     <ol class="section-footer gemini-steps">
       <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and sign in with Google.</li>
       <li>Tap <strong>Create API key</strong>. When asked for a project:<ul><li>Pick <strong>Default Gemini Project</strong> (Google creates it for most accounts), or any project you already have.</li><li>No project in the list? Tap <strong>Create project</strong>, name it anything (e.g. FueLoop), then create the key in it.</li></ul></li>
       <li>Copy the key (starts with <code>AIza</code> or <code>AQ.</code>), paste it above, and tap <strong>Save</strong>.</li>
-    </ol>
-    <p class="section-footer">Your key stays on this device only and uses your own free Gemini quota.</p>
+    </ol>`;
+
+function aiKeysSectionHtml() {
+  const blocks = PROVIDERS.map((p) => {
+    const key = getKey(p.id);
+    if (key) {
+      return `<div class="group">
+        <div class="row">
+          <span class="row-label">${esc(p.label)} · Key saved ••••${esc(key.slice(-4))}</span>
+        </div>
+      </div>
+      <button type="button" class="btn btn-danger" data-role="ai-key-remove" data-provider="${p.id}">Remove</button>`;
+    }
+    return `<div class="group">
+        <div class="row">
+          <input type="password" data-role="ai-key-input" data-provider="${p.id}" placeholder="${esc(p.label)} API key" autocomplete="off" autocapitalize="off" spellcheck="false" style="text-align:left" />
+        </div>
+      </div>
+      <button type="button" class="btn btn-primary" data-role="ai-key-save" data-provider="${p.id}">Save ${esc(p.label)} key</button>
+      <p class="section-footer"><a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">Get a free key</a> (${esc(p.keyHint)}). ${esc(p.limits)}</p>
+      ${p.id === 'gemini' ? GEMINI_STEPS_HTML : ''}`;
+  }).join('');
+
+  return `<div class="section">
+    <h2 class="section-header">AI keys</h2>
+    ${blocks}
+    <p class="section-footer">Add one or more. If one is busy or out of free requests, FueLoop tries the next. Keys stay on this device.</p>
   </div>`;
 }
 
@@ -236,19 +237,22 @@ function wireChallengesDelegation(root) {
       if (confirm('Disconnect your Google account on this device?')) disconnect();
       return;
     }
-    if (e.target.closest('[data-role="gemini-save"]')) {
-      const input = root.querySelector('[data-role="gemini-key"]');
+    const saveBtn = e.target.closest('[data-role="ai-key-save"]');
+    if (saveBtn) {
+      const id = saveBtn.dataset.provider;
+      const provider = PROVIDERS.find((p) => p.id === id);
+      const input = root.querySelector(`[data-role="ai-key-input"][data-provider="${id}"]`);
       const value = (input ? input.value : '').trim();
-      if (!GEMINI_KEY_RE.test(value)) {
-        alert('Enter a valid Gemini API key.');
+      if (!provider || !setKey(id, value)) {
+        alert(`Enter a valid ${provider ? provider.label : 'AI'} key (${provider ? provider.keyHint : ''}).`);
         return;
       }
-      setGeminiKey(value);
       if (challengesCurrent) await renderChallenges(challengesCurrent.root);
       return;
     }
-    if (e.target.closest('[data-role="gemini-remove"]')) {
-      clearGeminiKey();
+    const removeBtn = e.target.closest('[data-role="ai-key-remove"]');
+    if (removeBtn) {
+      clearKey(removeBtn.dataset.provider);
       if (challengesCurrent) await renderChallenges(challengesCurrent.root);
     }
   });
@@ -274,7 +278,7 @@ export async function renderChallenges(root) {
       <p class="section-footer">${esc(exportInfo.text)} Add to Home Screen for reliable offline storage.</p>
     </div>
     ${googleSectionHtml()}
-    ${geminiSectionHtml()}
+    ${aiKeysSectionHtml()}
   `;
 
   wireChallengesDelegation(root);
@@ -681,7 +685,7 @@ function healthHtml(h) {
           <input type="checkbox" class="switch" data-role="health-share" aria-label="Share health info with the AI coach" ${h.shareWithAi ? 'checked' : ''} />
         </div>
       </div>
-      <p class="section-footer">Off by default. When on, your conditions, medicines, waist and labs are sent to Google Gemini with the weight review, using your own API key. On Google's free tier, Google may use this data to improve its models. It is never sent otherwise.</p>
+      <p class="section-footer">Off by default. When on, your conditions, medicines, waist and labs are sent to your AI provider (Gemini, Groq or OpenRouter) with the weight review, using your own API key. On Google's free tier, Google may use this data to improve its models. It is never sent otherwise.</p>
     </div>
   </div>`;
 }

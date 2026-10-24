@@ -17,7 +17,7 @@ import { renderChallenges, renderChallengeForm, importBackupFlow } from './ui/ch
 import { renderSummary } from './ui/summary.js';
 import { renderStats } from './ui/stats.js';
 import { renderPlanner } from './ui/planner.js';
-import { getGeminiKey } from './gemini.js';
+import { anyKey } from './ai/keys.js';
 import { openAiKeySheet } from './ui/aiKeySheet.js';
 import { startReminders } from './reminderRunner.js';
 import { consumeAuthRedirect, autoConnectIfNeeded, onAuthChange } from './googleAuth.js';
@@ -224,12 +224,12 @@ async function render() {
   updateAiBanner();
 }
 
-// Top banner: visible whenever there's no Gemini key (dismissed prompt or not),
+// Top banner: visible whenever there's no AI key (dismissed prompt or not),
 // except on the full-screen summary route.
 function updateAiBanner() {
   const banner = document.getElementById('ai-banner');
   if (!banner) return;
-  banner.hidden = !!getGeminiKey() || matchRoute().top === 'summary';
+  banner.hidden = anyKey() || matchRoute().top === 'summary';
 }
 
 window.addEventListener('fueloop:aikey', () => { updateAiBanner(); scheduleRender(); });
@@ -299,7 +299,7 @@ async function boot() {
 
     let promptDismissed = false;
     try { promptDismissed = localStorage.getItem('tracker:aiPromptDismissed') === '1'; } catch (_) { /* storage blocked */ }
-    if (!getGeminiKey() && !promptDismissed && !isNotifyTest && matchRoute().top !== 'summary') {
+    if (!anyKey() && !promptDismissed && !isNotifyTest && matchRoute().top !== 'summary') {
       openAiKeySheet({ welcome: true });
     }
 
