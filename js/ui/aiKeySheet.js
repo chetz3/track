@@ -6,7 +6,7 @@
 // into an existing element.
 
 import { openSheet } from './sheet.js';
-import { setGeminiKey, GEMINI_KEY_RE } from '../gemini.js';
+import { setKey, isValidKey } from '../ai/keys.js';
 
 export const AI_PROMPT_DISMISSED_KEY = 'tracker:aiPromptDismissed';
 
@@ -37,6 +37,7 @@ function setupHtml(welcome) {
       </div>
     </div>
     <div class="section-footer error" data-role="ai-key-error" role="alert" hidden></div>
+    <p class="section-footer">You can also add free Groq or OpenRouter keys later in Challenges → AI keys, as backups.</p>
     <button type="button" class="btn btn-primary" data-role="ai-key-save">Save key</button>
     <button type="button" class="btn btn-secondary" data-role="${welcome ? 'ai-key-back' : 'ai-key-close'}">${welcome ? 'Back' : 'Not now'}</button>`;
 }
@@ -65,12 +66,12 @@ export function openAiKeySheet({ welcome = false } = {}) {
         const input = root.querySelector('[data-role="ai-key-input"]');
         const errEl = root.querySelector('[data-role="ai-key-error"]');
         const value = input.value.trim();
-        if (!GEMINI_KEY_RE.test(value)) {
+        if (!isValidKey('gemini', value)) {
           errEl.textContent = 'That doesn\'t look like a valid Gemini API key. Copy the whole key from Google AI Studio and try again.';
           errEl.hidden = false;
           return;
         }
-        setGeminiKey(value);
+        setKey('gemini', value);
         close();
       };
 

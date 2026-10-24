@@ -11,7 +11,7 @@ import { savePhoto, deletePhoto, getPhotoBlob, photoDateOf } from '../photos.js'
 import { esc, formatDateLong, formatDateShort, hydratePhotos, readFileAsPhoto, icon, stepKind, loaderHtml } from './dom.js';
 import { runFx, confettiOnce } from './fx.js';
 import { isFoodStep, buildFoodPatch, mealsTotal, mealsMacros, macroDotLine, macroInlineLine, MACRO_KEYS, MACRO_META } from '../foodLogic.js';
-import { estimateCalories, suggestMeals, checkBody, getGeminiKey } from '../gemini.js';
+import { estimateCalories, suggestMeals, checkBody, aiAvailable } from '../gemini.js';
 import { openSheet } from './sheet.js';
 import { trendStatus, weekCheck, isDietBreakActive, dietBreakState } from '../trend.js';
 import { revertChange } from '../coach.js';
@@ -821,7 +821,7 @@ function foodConfirmBodyHtml(state) {
   </div>
   ${errorHtml}
   <div class="btn-pair">
-    ${getGeminiKey() ? `<button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? loaderHtml('Re-estimating…') : 'Re-estimate'}</button>` : ''}
+    ${aiAvailable() ? `<button type="button" class="btn btn-secondary" data-role="food-reestimate"${disabledAttr}>${state.busy ? loaderHtml('Re-estimating…') : 'Re-estimate'}</button>` : ''}
     <button type="button" class="btn btn-secondary" data-role="food-cancel">Cancel</button>
   </div>
   <button type="button" class="btn btn-primary" data-role="food-save"${disabledAttr}>Save</button>`;
@@ -983,8 +983,8 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, ini
 // saved photo until it hands off to the confirm sheet (which then owns
 // cleanup via its own onClose); every other close path deletes it.
 function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
-  const noAiReason = !getGeminiKey()
-    ? 'No Gemini key set — enter the meal yourself. (Add a key in Challenges → Gemini AI to estimate automatically.)'
+  const noAiReason = !aiAvailable()
+    ? 'No AI key set — enter the meal yourself. (Add a key in Challenges → AI keys to estimate automatically.)'
     : !navigator.onLine ? "You're offline — enter the meal yourself." : '';
   const state = { note: '', busy: false, error: '' };
   // No blob = "Describe meal": the note is the whole description.

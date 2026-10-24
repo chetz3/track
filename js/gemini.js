@@ -1,35 +1,26 @@
-// Gemini calls: food-photo calorie estimation, next-day meal suggestions,
-// and the weekly body check (see
-// docs/superpowers/plans/2026-09-30-meal-suggestions.md). Called straight
-// from the browser with fetch — there is no server. The API key lives only
-// in this device's localStorage (never committed, never put in the URL) and
-// is sent as the x-goog-api-key header on each request.
+// AI calls: food-photo calorie estimation, next-day meal suggestions, and the
+// weekly body check (see docs/superpowers/plans/2026-09-30-meal-suggestions.md).
+// Called straight from the browser with fetch — there is no server. The
+// request goes through js/ai/router.js, which tries Gemini, then Groq, then
+// OpenRouter, using whichever keys the user saved on this device.
 
 import { parseCalorieResult } from './foodLogic.js';
 import { parseMealPlan, planTotals, kcalWarning, eatingWindow, compactSuggestInput, MEAL_STYLES, slotStyle } from './mealPlan.js';
 import { REVIEW_SCHEMA, reviewPrompt, parseReview } from './coach.js';
+import { askAI } from './ai/router.js';
+import { PROVIDERS, getKey, setKey, clearKey, anyKey } from './ai/keys.js';
 
-// Classic keys look like "AIza…"; newer AI Studio keys like "AQ.…" (with a dot).
-export const GEMINI_KEY_RE = /^[A-Za-z0-9._-]{20,}$/;
+// Kept so older imports keep working; the key logic lives in js/ai/keys.js.
+export const GEMINI_KEY_RE = PROVIDERS[0].keyRe;
+export const KEY_STORAGE = PROVIDERS[0].storage;
+export const getGeminiKey = () => getKey('gemini');
+export const setGeminiKey = (key) => setKey('gemini', key);
+export const clearGeminiKey = () => clearKey('gemini');
 
-export const KEY_STORAGE = 'tracker:geminiKey';
-
-export function getGeminiKey() {
-  try {
-    return localStorage.getItem(KEY_STORAGE) || '';
-  } catch (_) {
-    return '';
-  }
-}
-
-function notifyKeyChange() {
-  try { window.dispatchEvent(new Event('fueloop:aikey')); } catch (_) { /* no window */ }
-}
-
-// True when an AI call can run: a saved key, or (dev host only) the
+// True when an AI call can run: any saved key, or (dev host only) the
 // ?mock=1 canned-answer mode, so the AI screens can be tested without a key.
 export function aiAvailable() {
-  if (getGeminiKey()) return true;
+  if (anyKey()) return true;
   try {
     return localStorage.getItem('tracker:mockGemini') === '1'
       && /^(localhost|127\.0\.0\.1|192\.168\.|10\.)/.test(location.hostname);
@@ -37,44 +28,6 @@ export function aiAvailable() {
     return false;
   }
 }
-
-export function setGeminiKey(key) {
-  try {
-    localStorage.setItem(KEY_STORAGE, key);
-  } catch (_) {
-    // ignore (private mode, quota, etc.)
-  }
-  notifyKeyChange();
-}
-
-export function clearGeminiKey() {
-  try {
-    localStorage.removeItem(KEY_STORAGE);
-  } catch (_) {
-    // ignore (private mode, quota, etc.)
-  }
-  notifyKeyChange();
-}
-
-// Tried in order. Flash-Lite first: it's the fastest free model, and every
-// answer here is an approximate estimate. Gemini 3.x models take
-// thinkingLevel (thinkingBudget is deprecated there, and sending both is a
-// 400); "minimal" is the lowest level they accept — 3.x can't switch
-// thinking fully off. The alias is a last resort with no thinking config, in
-// case Google retires a pinned id.
-const MODELS = [
-  { id: 'gemini-3.5-flash-lite', thinking: { thinkingLevel: 'minimal' } },
-  { id: 'gemini-3.6-flash', thinking: { thinkingLevel: 'minimal' } },
-  { id: 'gemini-flash-lite-latest', thinking: null },
-];
-const endpoint = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-// 429 too: each model has its own free-tier quota, so the next can still
-// answer when one's per-minute limit is used up. 400 too (unless the key is
-// bad): a model that rejects a parameter shouldn't block the others.
-const RETRYABLE = new Set([400, 404, 429, 500, 503]);
-// Speed beats depth: the model is told to answer at once and thinking is
-// kept at its minimum.
-const FAST_INSTRUCTION = 'Answer immediately with your best estimate. Approximate values are fine — do not deliberate, double-check or explain. Keep every string short.';
 
 const PROMPT = `You are a nutrition estimator. Estimate the calories of the food in this photo.
 - List each distinct food or drink with its visible portion (use plates, cutlery, hands for scale).
@@ -135,136 +88,17 @@ function blobToBase64(blob) {
   });
 }
 
-// A 429 body carries google.rpc.QuotaFailure details naming the exact limit
-// hit, e.g. { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier',
-// quotaValue: '250', quotaDimensions: { model: 'gemini-2.5-flash' } }.
-// Google doesn't publish free-tier numbers, so this is the only concrete
-// source — surfaced in the error text as "(limit 250/day on gemini-2.5-flash)".
-function quotaLimitText(bodyText) {
-  try {
-    const details = JSON.parse(bodyText).error.details || [];
-    const v = details.flatMap((d) => d.violations || []).find((x) => x.quotaValue);
-    if (!v) return '';
-    const per = /PerDay/i.test(v.quotaId) ? 'day' : /PerMinute/i.test(v.quotaId) ? 'min' : '';
-    const model = v.quotaDimensions && v.quotaDimensions.model;
-    return ` (limit ${v.quotaValue}${per ? '/' + per : ''}${model ? ' on ' + model : ''})`;
-  } catch (_) {
-    return '';
-  }
-}
-
-function friendlyError(status, bodyText) {
-  if (status === 429) console.warn('Gemini quota hit:', bodyText);
-  if (status === 429 && /PerDay/i.test(bodyText || '')) return `Gemini free-tier daily limit reached${quotaLimitText(bodyText)}. Try again tomorrow.`;
-  if (status === 429) return `Gemini free-tier limit reached${quotaLimitText(bodyText)}. Try again in a minute.`;
-  if (status === 401 || status === 403) return 'Gemini API key is invalid.';
-  if (status === 400 && /API_KEY_INVALID/.test(bodyText || '')) return 'Gemini API key is invalid.';
-  // Google's own message says which parameter or model it rejected.
-  let detail = '';
-  try { detail = JSON.parse(bodyText).error.message || ''; } catch (_) { /* not JSON */ }
-  return `Gemini error (${status})${detail ? ': ' + detail.slice(0, 160) : ''}`;
-}
-
-// Shared by estimateCalories/suggestMeals/checkBody: the key/offline checks,
-// the model-fallback fetch loop (Flash first, Lite on a 404/429/500/503), the
-// friendly-error mapping, and pulling the answer text out of the response
-// (thinking models can return thought parts first — keep only the rest).
-// Returns the parsed JSON body; each caller applies its own
-// parse*/validation on top (parseCalorieResult, parseMealPlan, ...), exactly
-// as estimateCalories always has. `offlineMessage` lets callers other than
-// food (which this message was originally written for) show wording that
-// fits what they were trying to do; estimateCalories's own default keeps its
-// original text unchanged.
-async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "You're offline. Connect to add food." } = {}) {
-  const key = getGeminiKey();
-  if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
-  if (!navigator.onLine) throw new Error(offlineMessage);
-
-  const makeBody = (thinking) => JSON.stringify({
-    systemInstruction: { parts: [{ text: FAST_INSTRUCTION }] },
-    contents: [{ parts }],
-    generationConfig: {
-      temperature,
-      responseMimeType: 'application/json',
-      responseSchema: schema,
-      ...(thinking ? { thinkingConfig: thinking } : {}),
-    },
-  });
-
-  const send = async (model, body) => {
-    const started = Date.now();
-    try {
-      const r = await fetch(endpoint(model), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body,
-      });
-      // Which model answered and how long it took, for tuning speed.
-      console.info(`[gemini] ${model} ${r.status} in ${Date.now() - started} ms`);
-      return r;
-    } catch (_) {
-      // fetch rejects on a genuine network failure (offline mid-request, DNS,
-      // connection reset) — navigator.onLine already caught the common case.
-      throw new Error(offlineMessage);
-    }
-  };
-
-  let res;
-  let errText = null;
-  for (const { id, thinking } of MODELS) {
-    errText = null;
-    res = await send(id, makeBody(thinking));
-    if (res.status === 400) {
-      // A model that rejects our thinkingConfig gets one resend without
-      // it. res.text() consumes the body, so keep it for below.
-      errText = await res.text().catch(() => '');
-      if (thinking && /thinking/i.test(errText)) {
-        errText = null;
-        res = await send(id, makeBody(null));
-      } else if (/API_KEY_INVALID/.test(errText)) {
-        break;
-      }
-    }
-    if (res.ok || !RETRYABLE.has(res.status)) break;
-  }
-
-  if (!res.ok) {
-    const bodyText = errText ?? await res.text().catch(() => '');
-    if (res.status === 503) throw new Error('Gemini is busy right now. Try again in a minute.');
-    throw new Error(friendlyError(res.status, bodyText));
-  }
-
-  const json = await res.json();
-  // Thinking models may return thought parts first; keep only answer text.
-  const rawText = (json?.candidates?.[0]?.content?.parts || [])
-    .filter((p) => typeof p.text === 'string' && !p.thought)
-    .map((p) => p.text)
-    .join('');
-  try {
-    return JSON.parse(rawText);
-  } catch (_) {
-    throw new Error('Unexpected response from Gemini');
-  }
-}
-
 // `blob` null = no photo: `note` is the user's description of what they ate.
 export async function estimateCalories(blob, note) {
-  const key = getGeminiKey();
-  if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
-  if (!navigator.onLine) throw new Error("You're offline. Connect to add food.");
-
-  if (!blob) {
-    const parsed = await callGemini([{ text: `${TEXT_PROMPT}\nWhat the user ate: ${note}` }], SCHEMA);
-    return parseCalorieResult(parsed);
-  }
+  const opts = { offlineMessage: "You're offline. Connect to add food.", parse: parseCalorieResult };
+  if (!blob) return askAI([{ text: `${TEXT_PROMPT}\nWhat the user ate: ${note}` }], SCHEMA, opts);
   const data = await blobToBase64(blob);
   const text = PROMPT + (note ? `\nUser note about this meal: ${note}` : '');
   const parts = [
     { inline_data: { mime_type: blob.type || 'image/jpeg', data } },
     { text },
   ];
-  const parsed = await callGemini(parts, SCHEMA);
-  return parseCalorieResult(parsed);
+  return askAI(parts, SCHEMA, opts);
 }
 
 // Dev-only: prompt size, so the token budget can be watched in the console
@@ -409,20 +243,21 @@ Data:${JSON.stringify(data)}`;
 // from the model, and a warning is attached (not thrown) when they land
 // outside the target ±10% band — see docs §5.
 export async function suggestMeals(input, avoidDishes, forDay) {
-  let parsed = null;
+  let plan = null;
+  const known = [...(input.dishFrequency || []).map((f) => f[0]), ...(input.recentPlans || []), ...(Array.isArray(avoidDishes) ? avoidDishes : [])];
+  const parse = (json) => parseMealPlan(json, { known });
   // Dev-only canned response (js/dev/mockSuggest.js), never on the live site.
   let mockOn = false;
   try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
   if (mockOn) {
     const { isDevHost } = await import('./dev/mock.js');
-    if (isDevHost()) parsed = await (await import('./dev/mockSuggest.js')).mockSuggest(input, avoidDishes);
+    if (isDevHost()) plan = parse(await (await import('./dev/mockSuggest.js')).mockSuggest(input, avoidDishes));
   }
-  if (!parsed) {
+  if (!plan) {
     const parts = [{ text: suggestPrompt(input, avoidDishes, forDay) }];
     logPromptSize('suggest', parts[0].text);
-    parsed = await callGemini(parts, SUGGEST_SCHEMA, { temperature: 0.8, offlineMessage: "You're offline. Connect to get meal suggestions." });
+    plan = await askAI(parts, SUGGEST_SCHEMA, { temperature: 0.8, offlineMessage: "You're offline. Connect to get meal suggestions.", parse });
   }
-  const plan = parseMealPlan(parsed, { known: [...(input.dishFrequency || []).map((f) => f[0]), ...(input.recentPlans || []), ...(Array.isArray(avoidDishes) ? avoidDishes : [])] });
   const totals = planTotals(plan);
   const warning = kcalWarning(totals.kcal, input.targets && input.targets.kcal);
   return { meals: plan.meals, why: plan.why, tips: plan.tips, fixes: plan.fixes, totals, warning };
@@ -492,8 +327,10 @@ export async function checkBody(photoBlob, profile) {
     { inline_data: { mime_type: photoBlob.type || 'image/jpeg', data } },
     { text },
   ];
-  const parsed = await callGemini(parts, BODY_SCHEMA, { offlineMessage: "You're offline. Connect to update your body check." });
-  return parseBodyCheck(parsed, fallbackBmi);
+  return askAI(parts, BODY_SCHEMA, {
+    offlineMessage: "You're offline. Connect to update your body check.",
+    parse: (json) => parseBodyCheck(json, fallbackBmi),
+  });
 }
 
 // ---------- plateau review (plateau-coach plan §5) ----------
@@ -508,19 +345,21 @@ export async function reviewPlateau(input, ctx, imageBlob = null) {
   let parsed = null;
   let mockOn = false;
   try { mockOn = localStorage.getItem('tracker:mockGemini') === '1'; } catch { /* storage blocked */ }
+  const parse = (json) => parseReview(json, ctx);
   const text = reviewPrompt(input);
   logPromptSize('review', text, imageBlob ? 'image: 1 tile ≈258 tokens' : '');
   if (mockOn) {
     const { isDevHost } = await import('./dev/mock.js');
-    if (isDevHost()) parsed = await (await import('./dev/mockReview.js')).mockReview(input);
+    if (isDevHost()) parsed = parse(await (await import('./dev/mockReview.js')).mockReview(input));
   }
   if (!parsed) {
     const parts = [{ text }];
     if (imageBlob) parts.push({ inlineData: { mimeType: 'image/jpeg', data: await blobToBase64(imageBlob) } });
-    parsed = await callGemini(parts, REVIEW_SCHEMA, {
+    parsed = await askAI(parts, REVIEW_SCHEMA, {
       temperature: 0.4,
       offlineMessage: "You're offline. Connect to run the weight review.",
+      parse,
     });
   }
-  return parseReview(parsed, ctx);
+  return parsed;
 }
