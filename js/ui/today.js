@@ -325,13 +325,22 @@ function noteRowHtml(step, entry, fieldCtx) {
 // see foodRowsHtml).
 function mealRowHtml(step, meal, fieldCtx) {
   return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
-    <img class="thumb thumb-meal" data-photo-id="${esc(meal.photoId)}" alt="" />
+    ${meal.photoId ? `<img class="thumb thumb-meal" data-photo-id="${esc(meal.photoId)}" alt="" />` : `<span class="thumb thumb-meal thumb-empty">${icon('food')}</span>`}
     <div class="row-label">
       <div>${esc(meal.dish || 'Meal')}</div>
       <div class="item-sub">${esc([mealTimeLabel(meal.at), macroDotLine(meal.macros)].filter(Boolean).join(' · '))}</div>
     </div>
     <span>${esc(meal.calories)} kcal</span>
     <button type="button" data-role="meal-delete" data-step-id="${esc(step.id)}" data-meal-id="${esc(meal.id)}" aria-label="Remove meal">×</button>
+  </div>`;
+}
+
+// "Describe meal": log a meal without a photo by typing what was eaten (the
+// same Add meal sheet, AI estimate from the text). `plannedId` links it to a
+// placeholder, like that placeholder's own photo buttons.
+function describeBtnHtml(step, fieldCtx, plannedId) {
+  return `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
+    <button type="button" class="btn btn-secondary" style="width:100%" data-role="food-describe" data-step-id="${esc(step.id)}"${plannedId ? ` data-planned-id="${esc(plannedId)}"` : ''}>Describe meal</button>
   </div>`;
 }
 
@@ -360,7 +369,8 @@ function plannedRowHtml(step, planned, meals, fieldCtx, isSavingPhoto) {
   if (status === 'logged') return summaryRow;
   const photoRow = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     ${photoPairHtml('planned-photo-input', `data-step-id="${esc(step.id)}" data-planned-id="${esc(planned.id)}"`, false, false, isSavingPhoto ? 'Analyzing…' : '')}
-  </div>`;
+  </div>
+  ${isSavingPhoto ? '' : describeBtnHtml(step, fieldCtx, planned.id)}`;
   return summaryRow + photoRow;
 }
 
@@ -499,7 +509,8 @@ function foodRowsHtml(step, entry, fieldCtx) {
   const plannedHtml = isFitness ? plannedListHtml(step, entry, fieldCtx, analyzing) : '';
   const addHtml = `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     ${photoPairHtml('food-input', `data-step-id="${esc(step.id)}"`, true, false, analyzing ? 'Analyzing…' : '')}
-  </div>`;
+  </div>
+  ${analyzing ? '' : describeBtnHtml(step, fieldCtx)}`;
   const planMealBtnHtml = isFitness ? `<div class="row" data-challenge-id="${esc(fieldCtx.challengeId)}" data-date="${esc(fieldCtx.date)}">
     <button type="button" class="btn btn-secondary" style="width:100%" data-role="plan-meal-open" data-step-id="${esc(step.id)}">Plan a meal</button>
   </div>` : '';
@@ -859,7 +870,7 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, ini
     bodyHtml: render(),
     onMount: (el) => { sheetEl = el; wire(el); },
     onClose: () => {
-      if (!saved) deletePhoto(photoId).catch(() => {});
+      if (!saved && photoId) deletePhoto(photoId).catch(() => {});
     },
   });
 
@@ -889,9 +900,13 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, ini
         state.error = '';
         rerenderSheet();
         try {
+          if (!blob && !state.note.trim()) {
+            state.error = 'Describe what you ate in the note first.';
+            return;
+          }
           const fresh = await estimateCalories(blob, state.note);
           if (!fresh.isFood) {
-            state.error = 'No food found in that photo.';
+            state.error = blob ? 'No food found in that photo.' : 'That doesn’t read as food. Add more detail.';
           } else {
             state.dish = fresh.dish || state.dish;
             state.items = fresh.items;
@@ -938,7 +953,7 @@ function openFoodConfirmSheet(ctx, stepId, photoId, blob, result, plannedId, ini
           const entry = (day.steps && day.steps[stepId]) || {};
           const newMeal = {
             id: makeMealId(),
-            photoId,
+            ...(photoId ? { photoId } : {}),
             dish: state.dish.trim(),
             calories: parsedTotal,
             macros,
@@ -972,14 +987,15 @@ function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
     ? 'No Gemini key set — enter the meal yourself. (Add a key in Challenges → Gemini AI to estimate automatically.)'
     : !navigator.onLine ? "You're offline — enter the meal yourself." : '';
   const state = { note: '', busy: false, error: '' };
-  const previewUrl = URL.createObjectURL(blob);
+  // No blob = "Describe meal": the note is the whole description.
+  const previewUrl = blob ? URL.createObjectURL(blob) : null;
   let handedOff = false;
   let sheetEl = null;
 
   const render = () => `<div id="meal-add-root">
-    <img class="meal-add-preview" src="${esc(previewUrl)}" alt="Meal photo" />
-    <label class="field-label" for="meal-add-note">Note</label>
-    <input type="text" id="meal-add-note" data-role="meal-add-note" placeholder="e.g. 2 dosa, no ghee, 1 cup rice" value="${esc(state.note)}"${state.busy ? ' disabled' : ''} />
+    ${previewUrl ? `<img class="meal-add-preview" src="${esc(previewUrl)}" alt="Meal photo" />` : ''}
+    <label class="field-label" for="meal-add-note">${previewUrl ? 'Note' : 'What did you eat?'}</label>
+    <input type="text" id="meal-add-note" data-role="meal-add-note" placeholder="${previewUrl ? 'e.g. 2 dosa, no ghee, 1 cup rice' : 'e.g. 1 cup rice, dal, beans poriyal, curd'}" value="${esc(state.note)}"${state.busy ? ' disabled' : ''} />
     ${noAiReason ? `<div class="section-footer">${esc(noAiReason)}</div>` : ''}
     ${state.error ? `<div class="section-footer photo-error">${esc(state.error)}</div>` : ''}
     ${noAiReason ? '' : `<button type="button" class="btn btn-primary" data-role="meal-add-estimate"${state.busy ? ' disabled' : ''}>${state.busy ? loaderHtml('Estimating…') : 'Estimate with AI'}</button>`}
@@ -988,12 +1004,12 @@ function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
   </div>`;
 
   const close = openSheet({
-    title: 'Add meal',
+    title: blob ? 'Add meal' : 'Describe meal',
     bodyHtml: render(),
     onMount: (el) => { sheetEl = el; wire(el); },
     onClose: () => {
-      URL.revokeObjectURL(previewUrl);
-      if (!handedOff) deletePhoto(photoId).catch(() => {});
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      if (!handedOff && photoId) deletePhoto(photoId).catch(() => {});
     },
   });
 
@@ -1029,6 +1045,11 @@ function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
       }
 
       if (e.target.closest('[data-role="meal-add-estimate"]')) {
+        if (!blob && !state.note.trim()) {
+          state.error = 'Describe what you ate first.';
+          rerenderSheet();
+          return;
+        }
         state.busy = true;
         state.error = '';
         rerenderSheet();
@@ -1037,7 +1058,7 @@ function openAddMealSheet(ctx, stepId, photoId, blob, plannedId) {
           if (handedOff || !sheetEl || !sheetEl.isConnected) return; // closed meanwhile; photo already cleaned up
           if (!result.isFood) {
             state.busy = false;
-            state.error = 'No food found in that photo.';
+            state.error = blob ? 'No food found in that photo.' : 'That doesn’t read as food. Add more detail.';
             rerenderSheet();
             return;
           }
@@ -2145,6 +2166,12 @@ function wireDelegation(root) {
     const summaryBtn = e.target.closest('[data-role="view-summary"]');
     if (summaryBtn) {
       location.hash = `#/summary/${summaryBtn.dataset.date}`;
+      return;
+    }
+    const describeBtn = e.target.closest('[data-role="food-describe"]');
+    if (describeBtn) {
+      const ctx = fieldContext(describeBtn);
+      if (ctx) openAddMealSheet(ctx, describeBtn.dataset.stepId, null, null, describeBtn.dataset.plannedId);
       return;
     }
     const mealDeleteBtn = e.target.closest('[data-role="meal-delete"]');

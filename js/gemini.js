@@ -85,6 +85,12 @@ const PROMPT = `You are a nutrition estimator. Estimate the calories of the food
 - If there is no food or drink, set is_food=false, items=[], total_calories=0.
 Respond only with JSON matching the schema.`;
 
+// Same rules for a meal the user describes in words instead of a photo.
+const TEXT_PROMPT = PROMPT
+  .replace('the food in this photo.', 'the food the user describes below.')
+  .replace('with its visible portion (use plates, cutlery, hands for scale).', 'with its portion; when none is given, assume one typical home serving.')
+  .replace('include visible oil,', 'include the usual oil,');
+
 const SCHEMA = {
   type: 'OBJECT',
   required: ['is_food', 'dish', 'total_calories', 'confidence', 'items'],
@@ -241,11 +247,16 @@ async function callGemini(parts, schema, { temperature = 0.2, offlineMessage = "
   }
 }
 
+// `blob` null = no photo: `note` is the user's description of what they ate.
 export async function estimateCalories(blob, note) {
   const key = getGeminiKey();
   if (!key) throw new Error('Add your Gemini API key in Challenges → Gemini AI.');
   if (!navigator.onLine) throw new Error("You're offline. Connect to add food.");
 
+  if (!blob) {
+    const parsed = await callGemini([{ text: `${TEXT_PROMPT}\nWhat the user ate: ${note}` }], SCHEMA);
+    return parseCalorieResult(parsed);
+  }
   const data = await blobToBase64(blob);
   const text = PROMPT + (note ? `\nUser note about this meal: ${note}` : '');
   const parts = [

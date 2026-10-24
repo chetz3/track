@@ -19,7 +19,7 @@ if (typeof globalThis.FileReader === 'undefined') {
   };
 }
 
-const { checkBody } = await import('../js/gemini.js');
+const { checkBody, estimateCalories } = await import('../js/gemini.js');
 
 const okRes = () => ({
   ok: true,
@@ -89,4 +89,15 @@ test('400 on every model shows Google\'s message', async () => {
   const bad = () => errRes(400, '{"error":{"message":"Invalid value at response_schema"}}');
   stubFetch([bad(), bad(), bad()]);
   await assert.rejects(checkBody(blob(), {}), { message: /Gemini error \(400\): Invalid value/ });
+});
+
+test('estimateCalories without a photo sends only the description', async () => {
+  const meal = { is_food: true, dish: 'Idli sambar', total_calories: 250, confidence: 'medium', items: [{ name: 'Idli', portion: '2 pcs', calories: 150, protein_g: 4, carbs_g: 30, fat_g: 1, fiber_g: 2 }, { name: 'Sambar', portion: '1 cup', calories: 100, protein_g: 5, carbs_g: 14, fat_g: 3, fiber_g: 4 }] };
+  stubFetch([{ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(meal) }] } }] }), text: async () => '' }]);
+  const r = await estimateCalories(null, '2 idli with sambar');
+  const sent = calls[0].body.contents[0].parts;
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /describes below/);
+  assert.match(sent[0].text, /What the user ate: 2 idli with sambar$/);
+  assert.equal(r.total, 250);
 });

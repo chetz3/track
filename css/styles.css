@@ -338,6 +338,7 @@ body { padding: env(safe-area-inset-top) 0 calc(104px + env(safe-area-inset-bott
 
 /* ---------- Food / water / small row actions ---------- */
 .thumb-meal { width: 56px; height: 56px; border-radius: 16px; }
+.thumb-empty { display: grid; place-items: center; color: var(--accent-ink); }
 .row > button[data-role="meal-delete"], .row > button[data-role="planned-edit"], .row > button[data-role="planned-delete"] { min-width: 44px; min-height: 44px; border: 0; border-radius: 50%; background: var(--raised); color: var(--text2); font: 700 18px var(--font); cursor: pointer; flex: none; padding: 0; }
 .water-btn { min-height: 48px; }
 .water-btn .icon { color: var(--c-water); }
